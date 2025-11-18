@@ -1,0 +1,63 @@
+# Git 相关
+.git
+.gitignore
+.gitattributes
+
+# Python 相关
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+
+# IDE 相关
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# 文档和日志
+*.md
+!README.md
+*.log
+*.txt
+!requirements.txt
+!requirements.full.txt
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+.DS_Store
+
+# 测试相关
+tests
+test_*.py
+*_test.py
+
+# 其他
+.env
+.env.local
+# 排除大文件和目录
+Tutorial
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.tar.gz
+*.tar
+*.gz
+examples
+docs
+tests
+.github
