@@ -1,0 +1,92 @@
+FROM registry.cn-hangzhou.aliyuncs.com/lazyllm/python:3.10-slim
+
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV TZ=Asia/Shanghai
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 设置时区
+RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 替换为阿里云 Debian 镜像源
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true && \
+    sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
+
+# 安装系统依赖和 CUDA 开发工具
+# 安装 GCC 13（CUDA 12.6 不支持 GCC 14+）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-13 \
+    g++-13 \
+    git \
+    curl \
+    libnuma-dev \
+    zlib1g-dev \
+    wget \
+    gnupg2 \
+    ca-certificates \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 \
+    && rm -rf /var/lib/apt/lists/* || true
+
+# 安装 CUDA toolkit (用于编译 flash-attn)
+# 使用 NVIDIA 官方仓库安装 CUDA 12.x
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    cuda-toolkit-12-6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f cuda-keyring_1.1-1_all.deb || true
+
+# 验证 GCC 版本并确保使用 GCC 13
+RUN gcc --version && g++ --version && \
+    update-alternatives --set gcc /usr/bin/gcc-13 && \
+    update-alternatives --set g++ /usr/bin/g++-13
+
+# 设置 CUDA 环境变量和编译器
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64
+ENV CC=/usr/bin/gcc-13
+ENV CXX=/usr/bin/g++-13
+# 解决 CUDA 头文件冲突和编译问题
+ENV CUDA_NVCC_FLAGS=-allow-unsupported-compiler
+ENV TORCH_CUDA_ARCH_LIST="8.0;9.0"
+ENV MAX_JOBS=1
+# 修复 mathcalls.h 头文件冲突 - 通过修改 nvcc 编译选项
+ENV NVCC_PREPEND_FLAGS="-D__USE_CUDACC__ -D__CUDA_ARCH__=800"
+ENV CXXFLAGS="-D_GLIBCXX_USE_C99_MATH_TR1"
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制源码
+COPY . /app/
+
+# 安装 Python 依赖
+# 先安装 torch（flash-attn 需要 torch 已安装）
+RUN set -x && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir "torch>=2.1.2" && \
+    # 先安装其他依赖（排除 flash-attn）
+    grep -v "^flash-attn" requirements.full.txt > /tmp/requirements.full.noflash.txt || true && \
+    pip install --no-cache-dir -r /tmp/requirements.full.noflash.txt && \
+    # 单独安装 flash-attn，使用修复的编译选项解决头文件冲突
+    # 通过修改 setup.py 或使用环境变量修复 mathcalls.h 冲突
+    TORCH_CUDA_ARCH_LIST="8.0;9.0" MAX_JOBS=1 \
+    NVCC_PREPEND_FLAGS='-D__USE_CUDACC__ -D__CUDA_ARCH__=800 -D_FORCE_INLINES' \
+    pip install --no-cache-dir flash-attn --no-build-isolation && \
+    pip install --no-cache-dir -e . && \
+    pip cache purge
+
+# 设置环境变量
+ENV PYTHONPATH=/app
+ENV LAZYLLM_DEFAULT_LAUNCHER=empty
+
+# 暴露端口
+EXPOSE 31340 31341
+
+# 默认命令（可以在 docker-compose.yml 中覆盖）
+CMD ["/bin/bash"]

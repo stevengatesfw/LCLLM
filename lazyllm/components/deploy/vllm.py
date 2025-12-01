@@ -64,7 +64,8 @@ class Vllm(LazyLLMDeployBase, metaclass=_VllmStreamParseParametersMeta):
         'swap_space',
         'mm_processor_kwargs',
         'limit_mm_per_prompt',
-        'hf_overrides'])
+        'hf_overrides',
+        'enforce_eager'])
 
     # TODO(wangzhihong): change default value for `openai_api` argument to True
     def __init__(self, trust_remote_code: bool = True, launcher: LazyLLMLaunchersBase = launchers.remote(ngpus=1),  # noqa B008
@@ -81,7 +82,12 @@ class Vllm(LazyLLMDeployBase, metaclass=_VllmStreamParseParametersMeta):
         self.options_keys = kw.pop('options_keys', [])
         if trust_remote_code and 'trust_remote_code' not in self.options_keys:
             self.options_keys.append('trust_remote_code')
-        self.kw.update(**{key: kw[key] for key in self.optional_keys if key in kw})
+        # 从 kw 中提取 optional_keys 中的参数并更新到 self.kw，同时从 kw 中移除这些键
+        optional_kw = {}
+        for key in list(kw.keys()):
+            if key in self.optional_keys:
+                optional_kw[key] = kw.pop(key)
+        self.kw.update(**optional_kw)
         self.kw.check_and_update(kw)
         self.random_port = False if 'port' in kw and kw['port'] and kw['port'] != 'auto' else True
         self.temp_folder = make_log_dir(log_path, 'vllm') if log_path else None
@@ -90,6 +96,23 @@ class Vllm(LazyLLMDeployBase, metaclass=_VllmStreamParseParametersMeta):
             parall_launcher = [lazyllm.pipeline(sleep_moment, launcher) for launcher in ray_launcher[1:]]
             self._prepare_deploy = lazyllm.pipeline(
                 ray_launcher[0], post_action=(lazyllm.parallel(*parall_launcher) if len(parall_launcher) else None))
+
+    def _parse_vllm_kwargs(self):
+        """解析 vllm 参数，处理布尔值和下划线到连字符的转换"""
+        string = []
+        for k, v in self.kw.items():
+            # 将下划线转换为连字符（vllm 使用连字符）
+            k = k.replace('_', '-')
+            # 处理布尔值：True 时只输出标志，False 时不输出
+            if isinstance(v, bool):
+                if v:
+                    string.append(f'--{k}')
+            elif type(v) is dict:
+                v = json.dumps(v).replace('\"', '\\\"')
+                string.append(f'--{k}={v}')
+            else:
+                string.append(f'--{k}={v}' if type(v) is not str else f'--{k}=\"{v}\"')
+        return ' '.join(string)
 
     def cmd(self, finetuned_model=None, base_model=None, master_ip=None):
         if not os.path.exists(finetuned_model) or \
@@ -109,7 +132,7 @@ class Vllm(LazyLLMDeployBase, metaclass=_VllmStreamParseParametersMeta):
                 cmd += f'ray start --address="{master_ip}" && '
             cmd += f'{sys.executable} -m {self._vllm_cmd} --model {finetuned_model} '
             if self._openai_api: cmd += '--served-model-name lazyllm '
-            cmd += self.kw.parse_kwargs()
+            cmd += self._parse_vllm_kwargs()
             cmd += ' ' + parse_options_keys(self.options_keys)
             if self.temp_folder: cmd += f' 2>&1 | tee {get_log_path(self.temp_folder)}'
             return cmd

@@ -225,6 +225,23 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
 
         if url := self._deploy_args.get('url'):
             assert len(self._deploy_args) == 1, 'Cannot provide other arguments together with url'
+            # 根据 URL 判断应该使用哪个 framework 的格式
+            # 如果 URL 包含 /v1/chat/interactive，使用 LMDeploy 格式
+            # 如果 URL 包含 /generate，使用 Vllm 格式
+            if '/v1/chat/interactive' in url:
+                if self._deploy is not lazyllm.deploy.LMDeploy:
+                    self._deploy = lazyllm.deploy.LMDeploy
+                    self._template.update(self._deploy.message_format, self._deploy.keys_name_handle,
+                                          self._deploy.default_headers, extract_result=self._deploy.extract_result,
+                                          stream_parse_parameters=self._deploy.stream_parse_parameters,
+                                          stream_url_suffix=self._deploy.stream_url_suffix, stop_words=stop_words)
+            elif '/generate' in url:
+                if self._deploy is not lazyllm.deploy.Vllm:
+                    self._deploy = lazyllm.deploy.Vllm
+                    self._template.update(self._deploy.message_format, self._deploy.keys_name_handle,
+                                          self._deploy.default_headers, extract_result=self._deploy.extract_result,
+                                          stream_parse_parameters=self._deploy.stream_parse_parameters,
+                                          stream_url_suffix=self._deploy.stream_url_suffix, stop_words=stop_words)
             self._set_url(re.sub(r'v1(?:/chat/completions)?/?$', 'v1/', url))
             self._get_deploy_tasks.flag.set(ignore_reset=True)
         self._deploy_args.pop('url', None)
@@ -545,7 +562,15 @@ class TrainableModule(UrlModule):
         url = self._url
 
         if self.template_message:
-            data = self._modify_parameters(copy.deepcopy(self.template_message), kw, optional_keys='modality')
+            # 允许所有在 template_message 中的键，以及常见的推理参数
+            template_keys = list(self.template_message.keys()) if self.template_message else []
+            # 如果使用 LMDeploy 且传入 max_tokens，需要映射到 max_new_tokens
+            if 'max_new_tokens' in template_keys and 'max_tokens' in kw:
+                kw['max_new_tokens'] = kw.pop('max_tokens')
+            allowed_keys = template_keys + ['modality', 'temperature', 'top_p', 'max_tokens', 'max_new_tokens', 'stream', 'stop', 'skip_special_tokens']
+            # 去重，保持顺序
+            allowed_keys = list(dict.fromkeys(allowed_keys))
+            data = self._modify_parameters(copy.deepcopy(self.template_message), kw, optional_keys=allowed_keys)
             data[self.keys_name_handle.get('inputs', 'inputs')] = __input
             if files and (keys := list(set(self.keys_name_handle).intersection(LazyLLMDeployBase.encoder_map.keys()))):
                 assert len(keys) == 1, 'Only one key is supported for encoder_mapping'
@@ -576,17 +601,22 @@ class TrainableModule(UrlModule):
         parse_parameters = self.stream_parse_parameters if stream_output else {'delimiter': b'<|lazyllm_delimiter|>'}
 
         # context bug with httpx, so we use requests
+        LOG.debug(f'Making request to {url} with stream={stream_output}, parse_parameters={parse_parameters}')
         with requests.post(url, json=data, stream=True, headers=headers, proxies={'http': None, 'https': None}) as r:
+            LOG.debug(f'Request response status: {r.status_code}')
             if r.status_code != 200:
                 raise requests.RequestException('\n'.join([c.decode('utf-8') for c in r.iter_content(None)]))
 
             messages, cache = '', ''
             token = getattr(self, '_tool_start_token', '')
             color = stream_output.get('color') if isinstance(stream_output, dict) else None
+            line_count = 0
 
             for line in r.iter_lines(**parse_parameters):
+                line_count += 1
                 if not line: continue
                 line = self._decode_line(line)
+                LOG.debug(f'Received line {line_count}: {line[:100] if len(str(line)) > 100 else line}')
 
                 chunk = self._prompt.get_response(self.extract_result_func(line, data))
                 chunk = chunk[len(messages):] if isinstance(chunk, str) and chunk.startswith(messages) else chunk
@@ -601,22 +631,31 @@ class TrainableModule(UrlModule):
                     cache += chunk
                     if not self._maybe_has_fc(token, cache): cache = self._stream_output(cache, color)
 
+            LOG.debug(f'Request completed, received {line_count} lines, messages length: {len(messages)}')
             if text_input: self._record_usage(text_input, messages)
             temp_output = self._extract_and_format(messages)
             return self._formatter(temp_output)
 
     def _modify_parameters(self, paras: dict, kw: dict, *, optional_keys: Union[List[str], str] = None):
+        # 先处理 optional_keys，确保它是列表格式
+        optional_keys_list = [optional_keys] if isinstance(optional_keys, str) else (optional_keys or [])
+        
         for key, value in paras.items():
             if key == self.keys_name_handle['inputs']: continue
             elif isinstance(value, dict):
                 if key in kw:
                     assert set(kw[key].keys()).issubset(set(value.keys()))
                     value.update(kw.pop(key))
-                else: [setattr(value, k, kw.pop(k)) for k in value.keys() if k in kw]
-            elif key in kw: paras[key] = kw.pop(key)
+                else: 
+                    # 从 kw 中移除所有在 value.keys() 中的键，并更新到 value 中
+                    for k in list(value.keys()):
+                        if k in kw:
+                            value[k] = kw.pop(k)
+            elif key in kw: 
+                paras[key] = kw.pop(key)
 
-        optional_keys = [optional_keys] if isinstance(optional_keys, str) else (optional_keys or [])
-        assert set(kw.keys()).issubset(set(optional_keys)), f'{kw.keys()} is not in {optional_keys}'
+        # 检查剩余的 kw 是否都在 optional_keys 中
+        assert set(kw.keys()).issubset(set(optional_keys_list)), f'{kw.keys()} is not in {optional_keys_list}'
         paras.update(kw)
         return paras
 

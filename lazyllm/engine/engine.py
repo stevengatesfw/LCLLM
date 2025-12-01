@@ -368,7 +368,11 @@ def make_local_llm(base_model: str, target_path: str = '', prompt: str = '', str
                    history: Optional[List[List[str]]] = None):
     if history and not (isinstance(history, list) and all(len(h) == 2 and isinstance(h, list) for h in history)):
         raise TypeError('history must be List[List[str, str]]')
-    m = lazyllm.TrainableModule(base_model, target_path, stream=stream, return_trace=return_trace)
+    # 当提供了 URL 时，设置 trust_remote_code=False 避免下载模型
+    # 因为此时模型已经部署在远程服务上，不需要本地下载
+    trust_remote_code = url is None or url == ''
+    m = lazyllm.TrainableModule(base_model, target_path, stream=stream, return_trace=return_trace,
+                                trust_remote_code=trust_remote_code)
     m.prompt(prompt, history=history)
     setup_deploy_method(m, deploy_method, url)
     return m
