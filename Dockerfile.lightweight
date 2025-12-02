@@ -1,0 +1,78 @@
+# 使用 Python slim 镜像（与 registry.cn-hangzhou.aliyuncs.com/lazyllm/lazyllm 一致）
+FROM registry.cn-hangzhou.aliyuncs.com/lazyllm/python:3.10-slim
+
+# 设置环境变量
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV TZ=Asia/Shanghai
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 设置时区
+RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 替换为阿里云 Debian 镜像源
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true && \
+    sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
+
+# 安装系统依赖（不包含 CUDA 开发工具）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    git \
+    curl \
+    libnuma-dev \
+    zlib1g-dev \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 升级 pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制源码
+COPY . /app/
+
+# 安装 Python 依赖
+# 注意：此版本不包含 flash-attn 的编译（因为不包含 CUDA 开发工具）
+# 如果需要 flash-attn，需要使用 CUDA devel 版本的基础镜像
+# 解决依赖冲突：
+# 1. pydantic 版本冲突：vllm==0.11.2 需要 pydantic>=2.12.0，但 requirements.txt 中指定了 pydantic<=2.10.6
+# 2. transformers 版本冲突：vllm==0.11.2 需要 transformers>=4.56.0，但 lazyllm-llamafactory==0.9.3.dev0 需要 transformers<=4.51.3
+# 3. torch 版本冲突：vllm==0.11.2 需要 torch==2.9.0，但 lmdeploy==0.8.0 需要 torch<=2.6.0
+# 因此需要排除这些包，让 vllm 的依赖自动安装兼容版本，其他包作为可选依赖单独处理
+RUN set -x && \
+    pip install --no-cache-dir -r requirements.txt && \
+    # 先安装其他依赖（排除 flash-attn、pydantic、transformers、torch、lmdeploy 和 lazyllm-llamafactory）
+    # 让 vllm 的依赖自动解决 transformers、pydantic 和 torch 版本
+    grep -v "^flash-attn" requirements.full.txt | grep -v "^pydantic" | grep -v "^transformers" | grep -v "^torch" | grep -v "^lmdeploy" | grep -v "^lazyllm-llamafactory" > /tmp/requirements.full.noflash.txt || true && \
+    pip install --no-cache-dir -r /tmp/requirements.full.noflash.txt && \
+    # lazyllm-llamafactory 版本说明：
+    # - 0.9.3.dev0 要求 transformers<=4.51.3（与 vllm>=4.56.0 冲突）
+    # - 0.9.4.dev2 只要求 transformers（无版本限制，兼容 vllm 的 transformers>=4.56.0）
+    # 使用最新版本 0.9.4.dev2 以兼容 vllm 的 transformers 版本要求
+    pip install --no-cache-dir lazyllm-llamafactory==0.9.4.dev2 && \
+    # lmdeploy 0.8.0 与 torch 2.9.0 不兼容（需要 <=2.6.0），暂时跳过或使用兼容版本
+    # 如果需要 lmdeploy，可以尝试升级到支持 torch 2.9.0 的版本，或单独处理
+    # pip install --no-cache-dir lmdeploy || true && \
+    pip install --no-cache-dir -e . && \
+    # 修复依赖冲突：lazyllm 安装时会降级 pydantic 和 uvicorn，需要重新升级到兼容版本
+    # vllm 需要 pydantic>=2.12.0，mcp 需要 pydantic>=2.11.0 和 uvicorn>=0.31.1
+    # 升级到满足所有依赖的版本
+    pip install --no-cache-dir --upgrade "pydantic>=2.12.0" "uvicorn>=0.31.1" && \
+    pip cache purge
+
+# 设置环境变量
+ENV PYTHONPATH=/app
+ENV LAZYLLM_DEFAULT_LAUNCHER=empty
+
+# 暴露端口
+EXPOSE 31340 31341
+
+# 默认命令（可以在 docker-compose.yml 中覆盖）
+CMD ["/bin/bash"]
