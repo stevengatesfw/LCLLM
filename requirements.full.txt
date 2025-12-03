@@ -72,7 +72,7 @@ diffusers==0.33.1
 sortedcontainers
 flash-attn
 lightllm
-lazyllm-llamafactory==0.9.3.dev0
+lazyllm-llamafactory==0.9.4.dev2
 rotary-embedding-torch
 infinity-emb==0.0.70
 ctranslate2
