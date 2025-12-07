@@ -371,6 +371,8 @@ def make_local_llm(base_model: str, target_path: str = '', prompt: str = '', str
     # 当提供了 URL 时，设置 trust_remote_code=False 避免下载模型
     # 因为此时模型已经部署在远程服务上，不需要本地下载
     trust_remote_code = url is None or url == ''
+    #debug 1205
+    lazyllm.LOG.info(f'make_local_llm----------------base_model: {base_model}, trust_remote_code: {trust_remote_code}, url: {url}')
     m = lazyllm.TrainableModule(base_model, target_path, stream=stream, return_trace=return_trace,
                                 trust_remote_code=trust_remote_code)
     m.prompt(prompt, history=history)

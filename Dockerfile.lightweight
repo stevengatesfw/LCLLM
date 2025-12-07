@@ -18,6 +18,7 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
     sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
 
 # 安装系统依赖（不包含 CUDA 开发工具）
+# libgl1 用于 paddleocr/opencv（在 Debian 12+ 中，libgl1-mesa-glx 已被替换为 libgl1）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -27,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     wget \
     ca-certificates \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # 升级 pip
@@ -52,6 +55,8 @@ RUN set -x && \
     # 让 vllm 的依赖自动解决 transformers、pydantic 和 torch 版本
     grep -v "^flash-attn" requirements.full.txt | grep -v "^pydantic" | grep -v "^transformers" | grep -v "^torch" | grep -v "^lmdeploy" | grep -v "^lazyllm-llamafactory" > /tmp/requirements.full.noflash.txt || true && \
     pip install --no-cache-dir -r /tmp/requirements.full.noflash.txt && \
+    # paddleocr 需要 paddlepaddle 作为依赖，显式安装以确保正确安装
+    pip install --no-cache-dir 'paddlepaddle>=2.5.0' || echo "Warning: paddlepaddle installation failed, paddleocr may not work" && \
     # lazyllm-llamafactory 版本说明：
     # - 0.9.3.dev0 要求 transformers<=4.51.3（与 vllm>=4.56.0 冲突）
     # - 0.9.4.dev2 只要求 transformers（无版本限制，兼容 vllm 的 transformers>=4.56.0）

@@ -80,10 +80,12 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
         #                    Then support Option for base_model
         base_model = base_model.rstrip('/\\')
         self._type = LLMType(type) if type else type
+        #debug 1205
+        lazyllm.LOG.info(f'_TrainableModuleImpl-----------------------base_model: {base_model}, trust_remote_code: {trust_remote_code}')
         self._base_model = (ModelManager(lazyllm.config['model_source']).download(base_model) or ''
                             if trust_remote_code else base_model)
         if not self._base_model:
-            LOG.warning(f'Cannot get a valid model from {base_model} by ModelManager.')
+            lazyllm.LOG.warning(f'Cannot get a valid model from {base_model} by ModelManager.')
         self._target_path = os.path.join(lazyllm.config['train_target_root'], target_path)
         self._stream = stream
         self._launchers: Dict[str, Dict[str, Launcher]] = dict(default=dict(), manual=dict())
@@ -94,7 +96,9 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
         self._train, self._finetune = train, finetune
         self._template = template
         _UrlHelper.__init__(self, url=url_wrapper)
-        if base_model and deploy: self.deploy_method(deploy)
+        # 初始化self._deploy属性，确保始终有值
+        self._deploy = None
+        if deploy: self.deploy_method(deploy)
         self._prepare_deploy = lambda target_path, base_model: lazyllm.package(target_path, base_model)
 
     def _get_train_or_deploy_args(self, arg_cls: str, disable: List[str] = []):  # noqa B006

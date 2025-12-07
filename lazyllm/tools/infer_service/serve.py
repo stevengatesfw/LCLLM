@@ -147,7 +147,8 @@ class InferServer(ServerBase):
         # wait 5 minutes for launch cmd
         hypram = dict(launcher=lazyllm.launchers.remote(sync=False, ngpus=job.num_gpus, retry=30), log_path=save_root)
         # 如果环境变量设置了 enforce_eager，则添加该参数以解决 sm_120 兼容性问题
-        if os.getenv('VLLM_ENFORCE_EAGER', 'false').lower() == 'true':
+        # 注意：enforce_eager 是 VLLM 的参数，只在 framework 是 VLLM 时才添加
+        if os.getenv('VLLM_ENFORCE_EAGER', 'false').lower() == 'true' and job.framework == 'VLLM':
             hypram['enforce_eager'] = True
         m = lazyllm.TrainableModule(job.model_name).deploy_method((getattr(lazyllm.deploy, job.framework), hypram))
 

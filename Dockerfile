@@ -16,6 +16,7 @@ RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && 
     sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list || true
 
 # 安装 Python 3.10 和系统依赖
+# libgl1 用于 paddleocr/opencv（在 Ubuntu 22.04+ 中，libgl1-mesa-glx 已被替换为 libgl1）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3.10-dev \
@@ -29,6 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     wget \
     ca-certificates \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # 创建 python 和 pip 的软链接
@@ -65,6 +68,8 @@ RUN set -x && \
     # 让 vllm 的依赖自动解决 transformers、pydantic 和 torch 版本
     grep -v "^flash-attn" requirements.full.txt | grep -v "^pydantic" | grep -v "^transformers" | grep -v "^torch" | grep -v "^lmdeploy" | grep -v "^lazyllm-llamafactory" > /tmp/requirements.full.noflash.txt || true && \
     pip install --no-cache-dir -r /tmp/requirements.full.noflash.txt && \
+    # paddleocr 需要 paddlepaddle 作为依赖，显式安装以确保正确安装
+    pip install --no-cache-dir 'paddlepaddle>=2.5.0' || echo "Warning: paddlepaddle installation failed, paddleocr may not work" && \
     # vllm 会自动安装 torch==2.9.0、torchvision==0.24.0、torchaudio==2.9.0 和 transformers>=4.56.0
     # 单独安装 flash-attn（禁用构建隔离，因为需要访问已安装的 torch）
     pip install --no-cache-dir --no-build-isolation flash-attn && \

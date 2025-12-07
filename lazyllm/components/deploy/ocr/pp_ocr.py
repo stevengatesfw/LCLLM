@@ -30,8 +30,27 @@ class _OCR(object):
         self.init_flag = lazyllm.once_flag()
 
     def load_paddleocr(self):
-        from lazyllm.thirdparty import paddleocr
-
+        import sys
+        try:
+            from lazyllm.thirdparty import paddleocr
+            #打印paddleocr版本
+            print('load_paddleocr----------------paddleocr version:')
+            print(paddleocr.__version__)
+        except ImportError as e:
+            error_msg = (
+                f"\n{'='*60}\n"
+                f"❌ 无法导入 paddleocr 模块\n"
+                f"{'='*60}\n"
+                f"当前 Python 解释器: {sys.executable}\n"
+                f"Python 版本: {sys.version}\n"
+                f"Python 路径: {sys.path[:3]}...\n"
+                f"\n请在该 Python 环境中安装 paddleocr:\n"
+                f"  {sys.executable} -m pip install paddleocr\n"
+                f"\n或者如果使用虚拟环境，请先激活虚拟环境再安装。\n"
+                f"{'='*60}\n"
+            )
+            print(error_msg)
+            raise ImportError(error_msg) from e
         paddleocr_kwargs = {
             'use_doc_orientation_classify': self.use_doc_orientation_classify,
             'use_doc_unwarping': self.use_doc_unwarping,
