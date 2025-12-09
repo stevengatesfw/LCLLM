@@ -1,0 +1,104 @@
+# 使用 NVIDIA 官方 CUDA 12.8 镜像
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+
+# 设置环境变量
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV TZ=Asia/Shanghai
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 设置时区
+RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 替换为阿里云 Ubuntu 镜像源（加速下载）
+RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list || true
+
+# 安装系统依赖（不包括 Python，使用 conda 安装）
+# libgl1 用于 paddleocr/opencv（在 Ubuntu 22.04+ 中，libgl1-mesa-glx 已被替换为 libgl1）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    git \
+    libnuma-dev \
+    zlib1g-dev \
+    wget \
+    ca-certificates \
+    bzip2 \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 下载并安装 Miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm /tmp/miniconda.sh
+
+# 先接受服务条款
+RUN /opt/conda/bin/conda tos accept
+# 创建名为 lcagent-core 的 conda 环境，并安装 Python 3.10
+RUN /opt/conda/bin/conda create -n lcagent-core python=3.10 -y && \
+    /opt/conda/bin/conda clean --all -f -y
+
+# 设置默认使用 lcagent-core conda 环境
+ENV CONDA_DEFAULT_ENV=lcagent-core
+ENV CONDA_PREFIX=/opt/conda/envs/lcagent-core
+ENV PATH=/opt/conda/envs/lcagent-core/bin:/opt/conda/bin:$PATH
+
+# 在 conda 环境中升级 pip
+RUN /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# CUDA 环境变量（NVIDIA 镜像已自动设置，显式设置以确保正确）
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+# 设置编译选项（用于 flash-attn）
+ENV TORCH_CUDA_ARCH_LIST="8.0;9.0"
+ENV MAX_JOBS=1
+# 增加编译超时和优化选项
+ENV FLASH_ATTENTION_SKIP_CUDA_BUILD=0
+ENV FLASH_ATTENTION_FORCE_BUILD=0
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制源码
+COPY . /app/
+
+# 安装 Python 依赖（在 lcagent-core conda 环境中）
+# 说明：将 flash-attn 分离到单独的 RUN 层，避免编译超时影响整个构建
+RUN set -x && \
+    grep -v "^flash-attn" requirements.full.txt | /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir -r /dev/stdin && \
+    /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir -e . && \
+    /opt/conda/envs/lcagent-core/bin/pip cache purge
+
+# 单独安装 flash-attn（分离层，避免编译超时影响其他依赖）
+# 优先尝试使用预编译 wheel（避免长时间编译），如果不可用则编译安装
+# 如果不需要 flash-attn，可以注释掉这一行
+RUN set -x && \
+    echo "🔍 尝试安装 flash-attn（优先使用预编译版本）..." && \
+    if /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir flash-attn --only-binary :all: 2>&1; then \
+        echo "✅ flash-attn 安装成功（使用预编译 wheel）" && \
+        /opt/conda/envs/lcagent-core/bin/pip show flash-attn | head -5; \
+    else \
+        echo "⚠️ 预编译 wheel 不可用，开始编译安装（可能需要 10-30 分钟）..." && \
+        if /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir --no-build-isolation flash-attn 2>&1; then \
+            echo "✅ flash-attn 编译安装成功" && \
+            /opt/conda/envs/lcagent-core/bin/pip show flash-attn | head -5; \
+        else \
+            echo "❌ flash-attn 安装失败，跳过（如果不需要可以忽略）" && \
+            true; \
+        fi; \
+    fi
+
+# 设置环境变量
+ENV PYTHONPATH=/app
+ENV LAZYLLM_DEFAULT_LAUNCHER=empty
+
+# 暴露端口
+EXPOSE 31340 31341
+
+# 默认命令（可以在 docker-compose.yml 中覆盖）
+CMD ["/bin/bash"]
