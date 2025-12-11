@@ -29,7 +29,6 @@ vllm_gpu_util: 0.9
 vllm_enforce_eager: false
 vllm_max_lora_rank: 32
 offload_folder: offload
-use_cache: true
 infer_dtype: auto
 hf_hub_token: null
 ms_hub_token: null
@@ -48,7 +47,8 @@ print_param_status: false
 template: null
 dataset: identity,alpaca_en_demo
 dataset_dir: lazyllm_temp_dir
-cutoff_len: 1024
+max_seq_len: 16384
+cutoff_len: 10000
 train_on_prompt: false
 streaming: false
 buffer_size: 16384
@@ -112,7 +112,6 @@ use_mps_device: false
 seed: 42
 data_seed: null
 jit_mode_eval: false
-use_ipex: false
 bf16: false
 fp16: true
 fp16_opt_level: O1

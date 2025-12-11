@@ -8,9 +8,9 @@ from lazyllm import LOG
 # Special Model Matching
 
 special_models = {
-    'llm': {'minicpm-2b-dpo-bf16'},
+    'llm': {'minicpm-2b-dpo-bf16', 'deepseek-ocr'},
     'vlm': {
-        'aria', 'r-4b', 'step3', 'deepseek-ocr', 'emu3-chat-hf', 'granite-speech-3.3-8b', 'idefics3-8b-llama3',
+        'aria', 'r-4b', 'step3', 'emu3-chat-hf', 'granite-speech-3.3-8b', 'idefics3-8b-llama3',
         'phi-4-multimodal-instruct', 'qwen2-audio-7b-instruct', 'mistral-small-3.1-24b-instruct-2503',
         'llava-next-video-7b-hf'},
     'stt': {},

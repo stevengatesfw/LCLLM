@@ -123,6 +123,23 @@ class Vllm(LazyLLMDeployBase, metaclass=_VllmStreamParseParametersMeta):
                             f'base_model({base_model}) will be used')
             finetuned_model = base_model
 
+        # 检查模型配置，如果 max_model_len 超过模型的最大位置嵌入，则自动调整
+        # 这对于 DeepSeek-OCR 等模型很重要（max_position_embeddings=8192）
+        # vLLM 0.12.0+ 不允许 max_model_len 超过 max_position_embeddings
+        if finetuned_model and 'max_model_len' in self.kw:
+            try:
+                config_path = os.path.join(finetuned_model, 'config.json')
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        model_config = json.load(f)
+                    max_pos_embeddings = model_config.get('max_position_embeddings')
+                    if max_pos_embeddings and self.kw['max_model_len'] > max_pos_embeddings:
+                        LOG.warning(f'max_model_len ({self.kw["max_model_len"]}) exceeds model max_position_embeddings ({max_pos_embeddings}). '
+                                  f'Adjusting to {max_pos_embeddings}.')
+                        self.kw['max_model_len'] = int(max_pos_embeddings)
+            except Exception as e:
+                LOG.debug(f'Failed to check model config for max_model_len adjustment: {e}')
+
         def impl():
             if self.random_port:
                 self.kw['port'] = random.randint(30000, 40000)
