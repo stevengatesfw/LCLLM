@@ -125,3 +125,21 @@ def infer_model_type(model_name: str) -> str:
             continue
     LOG.warning(f'Cannot classify model type for: {model_name}. Defaulting to "llm" instead.')
     return 'llm'
+
+
+# Model Deploy Configuration
+# 模型部署配置：为特定模型配置部署参数（如 logits_processors）
+# 配置格式：{模型名称（小写）: {部署参数键: 部署参数值}}
+MODEL_DEPLOY_CONFIG = {
+    'deepseek-ocr': {
+        # 'logits_processors': 'vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor',  #TODO: 临时注释掉，官方没有vllm服务器形式的传参方法，部分图片识别不准不知道是不是这个原因
+        # message_format={
+        #     'extra_args': {
+        #         'ngram_size': 30,
+        #         'window_size': 90,
+        #         'whitelist_token_ids': {128821, 128822}
+        #     }
+        # } #同上
+        'openai_api': True  # 使用 OpenAI API 模式，支持多模态输入（图片等）
+    }
+}

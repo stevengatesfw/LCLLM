@@ -111,8 +111,12 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
             if arg_cls == 'deploy' and self._deploy is lazyllm.deploy.AutoDeploy:
                 self._deploy, args['launcher'], self._deploy_args = lazyllm.deploy.AutoDeploy.get_deployer(
                     base_model=self._base_model, type=self._type, **args)
+                # 重要：get_deployer 返回的 self._deploy_args 包含了从 MODEL_DEPLOY_CONFIG 中获取的配置（如 openai_api）
+                # 需要将 self._deploy_args 的内容合并到 args 中，确保返回值包含这些配置
+                args.update(self._deploy_args)
             args['launcher'] = args['launcher'].clone() if args.get('launcher') else launchers.remote(sync=False)
             self._launchers['default'][arg_cls] = args['launcher']
+
         return args
 
     def _get_train_tasks_impl(self, mode: Optional[str] = None, **kw):
@@ -199,7 +203,7 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
 
     def _deploy_setter_hook(self):
         self._deploy_args = self._get_train_or_deploy_args('deploy', disable=['target_path'])
-
+        
         if hasattr(self._deploy, 'auto_map') and self._deploy.auto_map:
             self._deploy_args = map_kw_for_framework(self._deploy_args, self._deploy.auto_map)
 
@@ -541,6 +545,7 @@ class TrainableModule(UrlModule):
 
     def forward_openai(self, __input: Union[Tuple[Union[str, Dict], str], str, Dict] = package(),  # noqa B008
                        *, llm_chat_history=None, lazyllm_files=None, tools=None, stream_output=False, **kw):
+        LOG.info(f'forward_openai: url={self._url}, lazyllm_files={lazyllm_files}, type={self.type}, __input type={type(__input)}')
         if not getattr(self, '_openai_module', None):
             model_type = self.type.lower()
             if model_type in ['llm', 'vlm']:
@@ -548,7 +553,7 @@ class TrainableModule(UrlModule):
                     source='openai', model='lazyllm', base_url=self._url, skip_auth=True, type=model_type,
                     stream=self._stream).share(prompt=self._prompt, format=self._formatter)
                 self._openai_module._prompt._set_model_configs(
-                    system='You are LazyLLM, a large language model developed by SenseTime.'
+                    system='You are LazyLLM, a large language model developed by LcAgent.'
                 )
             elif model_type in ['embed', 'rerank']:
                 self._openai_module = lazyllm.OnlineEmbeddingModule(
@@ -564,14 +569,13 @@ class TrainableModule(UrlModule):
         __input, files = self._get_files(__input, lazyllm_files)
         text_input_for_token_usage = __input = self._prompt.generate_prompt(__input, llm_chat_history, tools)
         url = self._url
-
         if self.template_message:
             # 允许所有在 template_message 中的键，以及常见的推理参数
             template_keys = list(self.template_message.keys()) if self.template_message else []
             # 如果使用 LMDeploy 且传入 max_tokens，需要映射到 max_new_tokens
             if 'max_new_tokens' in template_keys and 'max_tokens' in kw:
                 kw['max_new_tokens'] = kw.pop('max_tokens')
-            allowed_keys = template_keys + ['modality', 'temperature', 'top_p', 'max_tokens', 'max_new_tokens', 'stream', 'stop', 'skip_special_tokens']
+            allowed_keys = template_keys + ['modality', 'temperature', 'top_p', 'max_tokens', 'max_new_tokens', 'stream', 'skip_special_tokens', 'extra_args']
             # 去重，保持顺序
             allowed_keys = list(dict.fromkeys(allowed_keys))
             data = self._modify_parameters(copy.deepcopy(self.template_message), kw, optional_keys=allowed_keys)
@@ -678,3 +682,9 @@ class TrainableModule(UrlModule):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._impl._base_model = state['base_model']
+
+
+
+
+
+

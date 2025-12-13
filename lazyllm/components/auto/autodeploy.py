@@ -13,6 +13,7 @@ from ..deploy.speech_to_text.sense_voice import SenseVoiceDeploy
 from ..deploy.text_to_speech import TTSDeploy
 from ..deploy.ocr.pp_ocr import OCRDeploy
 from ..utils.downloader import ModelManager
+from ..utils.downloader.model_directory import MODEL_DEPLOY_CONFIG
 from typing import Optional
 
 
@@ -39,6 +40,13 @@ class AutoDeploy(LazyLLMDeployBase):
                      log_path: Optional[str] = None, **kw):
         model_name = get_model_name(base_model)
         kw['log_path'], kw['trust_remote_code'] = log_path, trust_remote_code
+        
+        # 应用模型特定部署配置（如果存在）
+        model_name_lower = model_name.lower()
+        if model_name_lower in MODEL_DEPLOY_CONFIG:
+            deploy_config = MODEL_DEPLOY_CONFIG[model_name_lower]
+            lazyllm.LOG.info(f'AutoDeploy.get_deployer: Found config for {model_name_lower}: {deploy_config}')
+            kw.update(deploy_config)
         if not type:
             type = ModelManager.get_model_type(model_name)
 

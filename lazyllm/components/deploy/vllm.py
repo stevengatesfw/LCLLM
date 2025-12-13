@@ -124,7 +124,6 @@ class Vllm(LazyLLMDeployBase, metaclass=_VllmStreamParseParametersMeta):
             finetuned_model = base_model
 
         # 检查模型配置，如果 max_model_len 超过模型的最大位置嵌入，则自动调整
-        # 这对于 DeepSeek-OCR 等模型很重要（max_position_embeddings=8192）
         # vLLM 0.12.0+ 不允许 max_model_len 超过 max_position_embeddings
         if finetuned_model and 'max_model_len' in self.kw:
             try:
@@ -152,6 +151,7 @@ class Vllm(LazyLLMDeployBase, metaclass=_VllmStreamParseParametersMeta):
             cmd += self._parse_vllm_kwargs()
             cmd += ' ' + parse_options_keys(self.options_keys)
             if self.temp_folder: cmd += f' 2>&1 | tee {get_log_path(self.temp_folder)}'
+            LOG.info(f' Vllm.cmd: final command (first 500 chars): {cmd[:500]}...')
             return cmd
 
         return LazyLLMCMD(cmd=impl, return_value=self.geturl,
