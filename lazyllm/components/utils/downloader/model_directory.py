@@ -140,6 +140,8 @@ MODEL_DEPLOY_CONFIG = {
         #         'whitelist_token_ids': {128821, 128822}
         #     }
         # } #同上
-        'openai_api': True  # 使用 OpenAI API 模式，支持多模态输入（图片等）
+        'openai_api': True,  # 使用 OpenAI API 模式，支持多模态输入（图片等）
+        'max_model_len': 5120,  # 降低最大序列长度以减少显存占用（从默认10240降到5120，给输入tokens留出空间）
+        'gpu_memory_utilization': 0.7,  # 降低显存利用率（从默认0.9降到0.7），减少KV cache预分配
     }
 }

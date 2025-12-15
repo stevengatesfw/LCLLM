@@ -131,7 +131,7 @@ class _UrlHelper(object):
     def _set_url(self, url):
         if redis_client:
             redis_client['url'].set(self._url_id, url)
-        LOG.debug(f'url: {url}')
+        LOG.info(f'_set_url: setting URL to {url}')
         self._url_wrapper.url = url
 
     def _release_url(self):

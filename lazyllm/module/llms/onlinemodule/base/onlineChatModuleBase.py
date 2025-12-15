@@ -90,9 +90,10 @@ class OnlineChatModuleBase(OnlineModuleBase, LLMBase):
 
     def _set_chat_url(self):
         self._url = urljoin(self._base_url, 'chat/completions')
-
+        lazyllm.LOG.info(f'_set_chat_url: self._url={self._url}')
     def _get_models_list(self):
         url = urljoin(self._base_url, 'models')
+        lazyllm.LOG.info(f'_get_models_list: url={url}')
         headers = {'Authorization': 'Bearer ' + self._api_key} if self._api_key else None
         with requests.get(url, headers=headers) as r:
             if r.status_code != 200:
@@ -166,7 +167,7 @@ class OnlineChatModuleBase(OnlineModuleBase, LLMBase):
         if len(kw) > 0: data.update(kw)
         if len(self._model_optional_params) > 0: data.update(self._model_optional_params)
 
-        lazyllm.LOG.debug(f' OnlineChatModuleBase.forward--------------------: url={self._url}, data={data}')
+        lazyllm.LOG.info(f' OnlineChatModuleBase.forward--------------------: url={self._url}, data={data}')
         #if self.type == 'VLM' and (files or self._vlm_force_format_input_with_files):
         if files or self._vlm_force_format_input_with_files:
             data['messages'][-1]['content'] = self._format_input_with_files(data['messages'][-1]['content'], files)
