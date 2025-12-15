@@ -129,7 +129,8 @@ class LazyLLMPrompterBase(metaclass=LazyLLMRegisterMetaClass):
         prompt_keys = list(set(re.findall(r'\{(\w+)\}', instruction)))
         if isinstance(input, (str, int)):
             if len(prompt_keys) == 1:
-                return instruction.format(**{prompt_keys[0]: input}), ''
+                # 使用 replace 方法而不是 format，避免 input 中包含 { 或 } 时导致格式化错误
+                return instruction.replace(f'{{{prompt_keys[0]}}}', str(input)), ''
             else:
                 assert len(prompt_keys) == 0
                 return instruction, input
