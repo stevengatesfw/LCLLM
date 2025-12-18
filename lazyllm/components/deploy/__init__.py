@@ -11,6 +11,7 @@ from .stable_diffusion import StableDiffusionDeploy
 from .text_to_speech import TTSDeploy, BarkDeploy, ChatTTSDeploy, MusicGenDeploy
 from .speech_to_text import SenseVoiceDeploy
 from .ocr import OCRDeploy
+from .deepseek_ocr import DeepSeekOCRDeploy
 
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     'MusicGenDeploy',
     'SenseVoiceDeploy',
     'OCRDeploy',
+    'DeepSeekOCRDeploy',
 ]

@@ -146,6 +146,14 @@ class InferServer(ServerBase):
         os.makedirs(save_root, exist_ok=True)
         # wait 5 minutes for launch cmd
         hypram = dict(launcher=lazyllm.launchers.remote(sync=False, ngpus=job.num_gpus, retry=30), log_path=save_root)
+        # 多卡时：让部署框架也按 num_gpus 做张量并行（否则仅分配多卡但实际仍单卡运行）
+        # - VLLM: 需要 --tensor-parallel-size
+        # - LMDeploy: 需要 --tp
+        if job.num_gpus and job.num_gpus > 1:
+            if job.framework in ('VLLM', 'vllm'):
+                hypram['tp'] = job.num_gpus
+            if job.framework in ('LMDeploy', 'lmdeploy'):
+                hypram['tp'] = job.num_gpus
         # 如果环境变量设置了 enforce_eager，则添加该参数以解决 sm_120 兼容性问题
         # 注意：enforce_eager 是 VLLM 的参数，只在 framework 是 VLLM 时才添加
         if os.getenv('VLLM_ENFORCE_EAGER', 'false').lower() == 'true' and job.framework == 'VLLM':
@@ -194,6 +202,17 @@ class InferServer(ServerBase):
         })
 
         return {'lwsName': job_id}
+
+    @app.get('/v1/system/gpu_info')
+    async def gpu_info(self, token: str = Header(DEFAULT_TOKEN)):  # noqa B008
+        # 读取 cloud-service 容器内的 GPU 信息（供前端动态展示）
+        try:
+            import torch  # noqa
+            count = int(torch.cuda.device_count())
+        except Exception:
+            count = 0
+        visible = os.getenv('CUDA_VISIBLE_DEVICES')
+        return {'gpu_count': count, 'cuda_visible_devices': visible}
 
     @app.delete('/v1/inference_services/{job_id}')
     async def cancel_job(self, job_id: str, token: str = Header(DEFAULT_TOKEN)):  # noqa B008
