@@ -121,7 +121,11 @@ class LightEngine(Engine):
         if _file_resources:
             lazyllm.globals['lazyllm_files'] = _file_resources
         nodes = [self.build_node(node) for node in self.subnodes(id, recursive=True)]
-        [node.func.valid_key() for node in nodes if isinstance(node.func, SharedHttpTool)]
+        # 过滤掉 None 节点和 func 为 None 的节点（如 __start__, __end__ 等特殊节点）
+        # 注意：需要先检查 node 和 node.func 是否为 None，再检查 isinstance
+        for node in nodes:
+            if node is not None and node.func is not None and isinstance(node.func, SharedHttpTool):
+                node.func.valid_key()
         f = self.build_node(id).func
         lazyllm.FileSystemQueue().dequeue()
         if history := _lazyllm_history:

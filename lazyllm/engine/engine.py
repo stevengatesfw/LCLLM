@@ -787,6 +787,12 @@ class LLM(lazyllm.ModuleBase):
         if self._keys and len(self._keys) > 1:
             assert len(args) == len(self._keys)
             args = ({k: a for k, a in zip(self._keys, args)},)
+        elif self._keys and len(self._keys) == 1:
+            # 如果只有一个 key，且输入是字典，提取对应的值；否则直接传递
+            assert len(args) == 1
+            if isinstance(args[0], dict) and self._keys[0] in args[0]:
+                args = (args[0][self._keys[0]],)
+            # 如果输入不是字典，直接传递
         else:
             assert len(args) == 1
         return self._m(*args, **kw)

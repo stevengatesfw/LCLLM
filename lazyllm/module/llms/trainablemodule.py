@@ -626,7 +626,9 @@ class TrainableModule(UrlModule):
                 line = self._decode_line(line)
                 LOG.debug(f'Received line {line_count}: {line[:100] if len(str(line)) > 100 else line}')
 
-                chunk = self._prompt.get_response(self.extract_result_func(line, data))
+                # 使用 text_input（格式化后的 prompt）而不是 data（请求体字典）来去除 prompt 部分
+                extracted = self.extract_result_func(line, data)
+                chunk = self._prompt.get_response(extracted, input=text_input if isinstance(text_input, str) else None)
                 chunk = chunk[len(messages):] if isinstance(chunk, str) and chunk.startswith(messages) else chunk
                 messages = chunk if not isinstance(chunk, str) else messages + chunk
 
