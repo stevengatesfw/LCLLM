@@ -34,7 +34,7 @@ class _StableDiffusion3(object):
             return caller_func
         return decorator
 
-    def __init__(self, base_sd, source=None, embed_batch_size=30, trust_remote_code=True, save_path=None, init=False):
+    def __init__(self, base_sd, source=None, embed_batch_size=30, trust_remote_code=True, save_path=None, init=False, num_gpus=1):
         source = lazyllm.config['model_source'] if not source else source
         self.base_sd = ModelManager(source).download(base_sd) or ''
         self.embed_batch_size = embed_batch_size
@@ -42,6 +42,7 @@ class _StableDiffusion3(object):
         self.paintor = None
         self.init_flag = lazyllm.once_flag()
         self.save_path = save_path or os.path.join(lazyllm.config['temp_dir'], 'sd3')
+        self.num_gpus = max(1, int(num_gpus)) if num_gpus else 1
         if init:
             lazyllm.call_once(self.init_flag, self.load_sd)
 
@@ -55,8 +56,15 @@ class _StableDiffusion3(object):
                 loader(self)
                 return
 
+        # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+        # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
         self.paintor = diffusers.StableDiffusion3Pipeline.from_pretrained(
-            self.base_sd, torch_dtype=torch.float16).to('cuda')
+            self.base_sd, torch_dtype=torch.float16)
+        if self.num_gpus > 1:
+            self.paintor.enable_model_cpu_offload()
+            lazyllm.LOG.info(f"Loaded StableDiffusion3Pipeline with multi-GPU support (num_gpus={self.num_gpus})")
+        else:
+            self.paintor.to('cuda')
 
     @staticmethod
     def image_to_base64(image):
@@ -102,6 +110,10 @@ class _StableDiffusion3(object):
 
     def __call__(self, string):
         lazyllm.call_once(self.init_flag, self.load_sd)
+        # 处理 dict 类型的输入，提取实际的字符串
+        if isinstance(string, dict):
+            string = string.get('inputs') or string.get('prompt') or string.get('input') or \
+                     next((v for v in string.values() if isinstance(v, str)), str(list(string.values())[0]) if string else '')
 
         for model_type, caller in self._call_registry.items():
             if model_type in self.base_sd.lower():
@@ -118,19 +130,26 @@ class _StableDiffusion3(object):
         return encode_query_with_filepaths(files=img_path_list)
 
     @classmethod
-    def rebuild(cls, base_sd, embed_batch_size, init, save_path):
-        return cls(base_sd, embed_batch_size=embed_batch_size, init=init, save_path=save_path)
+    def rebuild(cls, base_sd, embed_batch_size, init, save_path, num_gpus=1):
+        return cls(base_sd, embed_batch_size=embed_batch_size, init=init, save_path=save_path, num_gpus=num_gpus)
 
     def __reduce__(self):
         init = bool(os.getenv('LAZYLLM_ON_CLOUDPICKLE', None) == 'ON' or self.init_flag)
-        return _StableDiffusion3.rebuild, (self.base_sd, self.embed_batch_size, init, self.save_path)
+        return _StableDiffusion3.rebuild, (self.base_sd, self.embed_batch_size, init, self.save_path, self.num_gpus)
 
 @_StableDiffusion3.register_loader('flux')
 def load_flux(model):
     import torch
     from diffusers import FluxPipeline
+    # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+    # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
     model.paintor = FluxPipeline.from_pretrained(
-        model.base_sd, torch_dtype=torch.bfloat16).to('cuda')
+        model.base_sd, torch_dtype=torch.bfloat16)
+    if model.num_gpus > 1:
+        model.paintor.enable_model_cpu_offload()
+        lazyllm.LOG.info(f"Loaded FluxPipeline with multi-GPU support (num_gpus={model.num_gpus})")
+    else:
+        model.paintor.to('cuda')
 
 @_StableDiffusion3.register_caller('flux')
 def call_flux(model, prompt):
@@ -149,8 +168,15 @@ def call_flux(model, prompt):
 def load_cogview(model):
     import torch
     from diffusers import CogView4Pipeline
+    # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+    # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
     model.paintor = CogView4Pipeline.from_pretrained(
-        model.base_sd, torch_dtype=torch.bfloat16).to('cuda')
+        model.base_sd, torch_dtype=torch.bfloat16)
+    if model.num_gpus > 1:
+        model.paintor.enable_model_cpu_offload()
+        lazyllm.LOG.info(f"Loaded CogView4Pipeline with multi-GPU support (num_gpus={model.num_gpus})")
+    else:
+        model.paintor.to('cuda')
 
 @_StableDiffusion3.register_caller('cogview')
 def call_cogview(model, prompt):
@@ -176,7 +202,8 @@ def load_wan(model):
     # tokenizer 和 text_encoder 在 google/umt5-xxl/ 子目录中
     tokenizer_path = os.path.join(model.base_sd, 'google', 'umt5-xxl')
     if not os.path.exists(tokenizer_path):
-        tokenizer_path = model.base_sd
+        lazyllm.LOG.warning(f"Tokenizer path {tokenizer_path} does not exist, using base_sd {model.base_sd}+'/tokenizer'")
+        tokenizer_path = model.base_sd + '/tokenizer'
     # 确保 tokenizer_path 是字符串
     if not isinstance(tokenizer_path, str):
         tokenizer_path = str(tokenizer_path)
@@ -199,13 +226,21 @@ def load_wan(model):
     
     # 先尝试自动加载 pipeline（不传递 tokenizer，让 pipeline 自动加载其他组件）
     try:
+        # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+        # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
         model.paintor = WanPipeline.from_pretrained(
             model.base_sd, 
             torch_dtype=torch.bfloat16)
+        if model.num_gpus > 1:
+            model.paintor.enable_model_cpu_offload()
+            lazyllm.LOG.info(f"Loaded WanPipeline with multi-GPU support (num_gpus={model.num_gpus})")
         # 替换为我们手动加载的 tokenizer（确保路径正确）
         if hasattr(model.paintor, 'tokenizer') and tokenizer is not None:
             model.paintor.tokenizer = tokenizer
             lazyllm.LOG.info("Replaced pipeline tokenizer with manually loaded tokenizer")
+            # 如果使用了 enable_model_cpu_offload，重新初始化以包含新的 tokenizer
+            if model.num_gpus > 1:
+                model.paintor.enable_model_cpu_offload()
     except Exception as e:
         # 如果自动加载失败，手动加载所有组件
         lazyllm.LOG.warning(f"WanPipeline auto-loading failed: {e}, loading components manually")
@@ -338,9 +373,14 @@ def load_wan(model):
         # 加载 pipeline，先尝试完全自动加载（不传递任何组件）
         # 如果自动加载失败，再尝试传递已加载的组件
         try:
+            # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+            # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
             model.paintor = WanPipeline.from_pretrained(
                 model.base_sd,
                 torch_dtype=torch.bfloat16)
+            if model.num_gpus > 1:
+                model.paintor.enable_model_cpu_offload()
+                lazyllm.LOG.info(f"Loaded WanPipeline with multi-GPU support (num_gpus={model.num_gpus})")
             # 如果自动加载成功，替换 tokenizer 和 text_encoder 为我们手动加载的版本
             if hasattr(model.paintor, 'tokenizer') and tokenizer is not None:
                 model.paintor.tokenizer = tokenizer
@@ -348,6 +388,9 @@ def load_wan(model):
                 model.paintor.text_encoder = text_encoder
             if hasattr(model.paintor, 'vae') and vae is not None:
                 model.paintor.vae = vae
+            # 如果使用了 enable_model_cpu_offload，重新初始化以包含替换的组件
+            if model.num_gpus > 1:
+                model.paintor.enable_model_cpu_offload()
         except Exception as e:
             lazyllm.LOG.warning(f"WanPipeline auto-loading failed: {e}, trying with manual components")
             # 如果自动加载失败，尝试传递所有已加载的组件
@@ -362,11 +405,18 @@ def load_wan(model):
         flow_shift=3.0
     )
     model.paintor.scheduler = scheduler
-    model.paintor.to('cuda')
+    # 多 GPU 时，如果使用了 enable_model_cpu_offload，则不需要手动 to('cuda')
+    # enable_model_cpu_offload 会自动管理设备分配
+    if model.num_gpus <= 1:
+        model.paintor.to('cuda')
 
 @_StableDiffusion3.register_caller('wan')
 def call_wan(model, prompt):
     from diffusers.utils import export_to_video
+    # 确保 prompt 是字符串或列表类型（dict 已在 __call__ 中处理）
+    if not isinstance(prompt, (str, list)):
+        prompt = str(prompt)
+    
     videos = model.paintor(
         prompt,
         negative_prompt=(
@@ -396,6 +446,12 @@ class StableDiffusionDeploy(LazyLLMDeployBase):
     keys_name_handle = None
     default_headers = {'Content-Type': 'application/json'}
 
+    @staticmethod
+    def extract_result(x, inputs):
+        # StableDiffusion 通过 RelayServer 返回，已经是 encode_query_with_filepaths 格式的字符串
+        # 不需要像 Vllm 那样解析 JSON，直接返回即可
+        return x
+
     def __init__(self, launcher: Optional[LazyLLMLaunchersBase] = None,
                  log_path: Optional[str] = None, trust_remote_code: bool = True, port: Optional[int] = None, **kw):
         super().__init__(launcher=launcher)
@@ -412,5 +468,8 @@ class StableDiffusionDeploy(LazyLLMDeployBase):
             LOG.warning(f'Note! That finetuned_model({finetuned_model}) is an invalid path, '
                         f'base_model({base_model}) will be used')
             finetuned_model = base_model
-        return lazyllm.deploy.RelayServer(port=self._port, func=_StableDiffusion3(finetuned_model),
+        # 从 launcher 获取 GPU 数量（如果可用）
+        num_gpus = getattr(self._launcher, 'ngpus', 1) if self._launcher else 1
+        num_gpus = max(1, int(num_gpus)) if num_gpus else 1
+        return lazyllm.deploy.RelayServer(port=self._port, func=_StableDiffusion3(finetuned_model, num_gpus=num_gpus),
                                           launcher=self._launcher, log_path=self._log_path, cls='stable_diffusion')()

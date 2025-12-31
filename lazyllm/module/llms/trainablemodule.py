@@ -107,13 +107,20 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
             raise ValueError(f'Key `{", ".join(disable)}` can not be set in '
                              '{arg_cls}_args, please pass them from Module.__init__()')
 
+        # 如果 self._deploy 是 AutoDeploy，需要先调用 get_deployer 来确定正确的部署类型
+        # 即使 args 中有 url，也应该先确定部署类型，因为 url 可能是之前调用时设置的
+        if arg_cls == 'deploy' and self._deploy is lazyllm.deploy.AutoDeploy:
+            saved_url = args.get('url')
+            self._deploy, args['launcher'], self._deploy_args = lazyllm.deploy.AutoDeploy.get_deployer(
+                base_model=self._base_model, type=self._type, **{k: v for k, v in args.items() if k != 'url'})
+            # 重要：get_deployer 返回的 self._deploy_args 包含了从 MODEL_DEPLOY_CONFIG 中获取的配置（如 openai_api）
+            # 需要将 self._deploy_args 的内容合并到 args 中，确保返回值包含这些配置
+            args.update(self._deploy_args)
+            # 如果之前有保存的 url，恢复它并只保留 url（满足断言要求）
+            if saved_url:
+                args = {'url': saved_url}
+        
         if not args.get('url'):
-            if arg_cls == 'deploy' and self._deploy is lazyllm.deploy.AutoDeploy:
-                self._deploy, args['launcher'], self._deploy_args = lazyllm.deploy.AutoDeploy.get_deployer(
-                    base_model=self._base_model, type=self._type, **args)
-                # 重要：get_deployer 返回的 self._deploy_args 包含了从 MODEL_DEPLOY_CONFIG 中获取的配置（如 openai_api）
-                # 需要将 self._deploy_args 的内容合并到 args 中，确保返回值包含这些配置
-                args.update(self._deploy_args)
             args['launcher'] = args['launcher'].clone() if args.get('launcher') else launchers.remote(sync=False)
             self._launchers['default'][arg_cls] = args['launcher']
 
@@ -208,20 +215,20 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
             self._deploy_args = map_kw_for_framework(self._deploy_args, self._deploy.auto_map)
 
         trainable_module_config_map = get_trainable_module_config_map(lazyllm.config['trainable_module_config_map_path'])
-
         base_model_name = os.path.basename(self._base_model)
         if base_model_name in trainable_module_config_map:
             deploy_args_for_check = {k: v for k, v in self._deploy_args.items() if k not in ignore_config_keys}
-            for module_config in trainable_module_config_map[base_model_name]:
+            for idx, module_config in enumerate(trainable_module_config_map[base_model_name]):
                 if (not deploy_args_for_check and not module_config.get('strict')) \
                         or not deepdiff.DeepDiff(module_config.get('deploy_config', {}), deploy_args_for_check):
                     try:
                         url = module_config.get('url')
                         requests.get(url, timeout=3)
                         self._deploy_args = {'url': url}
-                        self._deploy = getattr(lazyllm.deploy, module_config.get('framework'))
+                        framework = module_config.get('framework')
+                        self._deploy = getattr(lazyllm.deploy, framework)
                         break
-                    except Exception:
+                    except Exception as e:
                         continue
 
         stop_words = ModelManager.get_model_prompt_keys(self._base_model).get('stop_words')
@@ -235,7 +242,9 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
             assert len(self._deploy_args) == 1, 'Cannot provide other arguments together with url'
             # 根据 URL 判断应该使用哪个 framework 的格式
             # 如果 URL 包含 /v1/chat/interactive，使用 LMDeploy 格式
-            # 如果 URL 包含 /generate，使用 Vllm 格式
+            # 如果 URL 包含 /generate，需要进一步判断：
+            #   - 如果当前是 StableDiffusionDeploy，保持使用 StableDiffusionDeploy 的 extract_result
+            #   - 否则使用 Vllm 格式
             if '/v1/chat/interactive' in url:
                 if self._deploy is not lazyllm.deploy.LMDeploy:
                     self._deploy = lazyllm.deploy.LMDeploy
@@ -244,12 +253,14 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
                                           stream_parse_parameters=self._deploy.stream_parse_parameters,
                                           stream_url_suffix=self._deploy.stream_url_suffix, stop_words=stop_words)
             elif '/generate' in url:
-                if self._deploy is not lazyllm.deploy.Vllm:
+                # 如果当前是 StableDiffusionDeploy，不要切换到 Vllm
+                if self._deploy is not lazyllm.deploy.Vllm and self._deploy is not lazyllm.deploy.StableDiffusionDeploy:
                     self._deploy = lazyllm.deploy.Vllm
-                    self._template.update(self._deploy.message_format, self._deploy.keys_name_handle,
-                                          self._deploy.default_headers, extract_result=self._deploy.extract_result,
-                                          stream_parse_parameters=self._deploy.stream_parse_parameters,
-                                          stream_url_suffix=self._deploy.stream_url_suffix, stop_words=stop_words)
+                # 统一更新 template（无论是 Vllm 还是 StableDiffusionDeploy）
+                self._template.update(self._deploy.message_format, self._deploy.keys_name_handle,
+                                      self._deploy.default_headers, extract_result=self._deploy.extract_result,
+                                      stream_parse_parameters=self._deploy.stream_parse_parameters,
+                                      stream_url_suffix=self._deploy.stream_url_suffix, stop_words=stop_words)
             self._set_url(re.sub(r'v1(?:/chat/completions)?/?$', 'v1/', url))
             self._get_deploy_tasks.flag.set(ignore_reset=True)
         self._deploy_args.pop('url', None)
@@ -624,10 +635,9 @@ class TrainableModule(UrlModule):
                 line_count += 1
                 if not line: continue
                 line = self._decode_line(line)
-                LOG.debug(f'Received line {line_count}: {line[:100] if len(str(line)) > 100 else line}')
-
-                # 使用 text_input（格式化后的 prompt）而不是 data（请求体字典）来去除 prompt 部分
+                LOG.info(f'Received line {line_count}: {line[:100] if len(str(line)) > 100 else line}')
                 extracted = self.extract_result_func(line, data)
+                LOG.info(f'extract_result_func returned: type={type(extracted)}, content (first 200 chars)={str(extracted)[:200]}')
                 chunk = self._prompt.get_response(extracted, input=text_input if isinstance(text_input, str) else None)
                 chunk = chunk[len(messages):] if isinstance(chunk, str) and chunk.startswith(messages) else chunk
                 messages = chunk if not isinstance(chunk, str) else messages + chunk
