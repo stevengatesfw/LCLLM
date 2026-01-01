@@ -44,6 +44,8 @@ llamafactory_mapping_dict = {
     'llama-2': 'llama2',
     'llama-3': 'llama3',
     'llama-3.2': 'mllama',
+    'meta-llama-3.2': 'mllama',  # Support Meta-Llama-3.2-* models
+    'meta-llama-3': 'llama3',  # Support Meta-Llama-3-* models
     'llava': 'llava',
     'llava-next': 'llava_next',
     'llava-next-mistral': 'llava_next_mistral',

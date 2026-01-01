@@ -47,7 +47,8 @@ print_param_status: false
 template: null
 dataset: identity,alpaca_en_demo
 dataset_dir: lazyllm_temp_dir
-cutoff_len: 1024
+max_seq_len: 16384
+cutoff_len: 10000
 train_on_prompt: false
 streaming: false
 buffer_size: 16384

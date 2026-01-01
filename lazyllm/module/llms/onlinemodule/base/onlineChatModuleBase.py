@@ -14,7 +14,7 @@ import lazyllm
 from lazyllm import globals, pipeline
 from lazyllm.components.prompter import PrompterBase
 from lazyllm.components.formatter import FormatterBase
-from lazyllm.components.utils.file_operate import _delete_old_files, _image_to_base64
+from lazyllm.components.utils.file_operate import _delete_old_files, _image_to_base64, _is_base64_with_mime
 from ....servermodule import LLMBase
 from .utils import OnlineModuleBase
 from ..map_model_type import get_model_type
@@ -91,9 +91,19 @@ class OnlineChatModuleBase(OnlineModuleBase, LLMBase):
             return url
         return urljoin(url, 'chat/completions')
 
+    def _set_chat_url(self):
+        self._url = self._get_chat_url(self._base_url)
+        lazyllm.LOG.info(f'_set_chat_url: self._url={self._url}')
+
     def _get_models_list(self):
         url = urljoin(self._base_url, 'models')
-        with requests.get(url, headers=self._header) as r:
+        lazyllm.LOG.info(f'_get_models_list: url={url}')
+        headers = getattr(self, '_header', None)
+        if headers is None:
+            # Use Bearer Authorization if possible
+            api_key = getattr(self, '_api_key', None)
+            headers = {'Authorization': 'Bearer ' + api_key} if api_key else None
+        with requests.get(url, headers=headers) as r:
             if r.status_code != 200:
                 raise requests.RequestException('\n'.join([c.decode('utf-8') for c in r.iter_content(None)]))
 
@@ -159,7 +169,7 @@ class OnlineChatModuleBase(OnlineModuleBase, LLMBase):
         stream_output = stream_output or self._stream
         __input, files = self._get_files(__input, lazyllm_files)
         runtime_base_url = url or kw.pop('base_url', None)
-        runtime_url = self._get_chat_url(runtime_base_url) if runtime_base_url else self._chat_url
+        runtime_url = self._get_chat_url(runtime_base_url) if runtime_base_url else self._get_chat_url(self._base_url)
         runtime_model = model or kw.pop('model_name', None) or self._model_name
         if get_model_type(runtime_model) not in ('llm', 'vlm'):
             raise ValueError(f"Model type must be 'llm' or 'vlm', got model {runtime_model}")
@@ -172,12 +182,13 @@ class OnlineChatModuleBase(OnlineModuleBase, LLMBase):
         if len(kw) > 0: data.update(kw)
         if len(self._model_optional_params) > 0: data.update(self._model_optional_params)
 
-        if self.type == 'VLM' and (files or self._vlm_force_format_input_with_files):
+        lazyllm.LOG.info(f' OnlineChatModuleBase.forward--------------------: url={runtime_url}, data={data}')
+        #if self.type == 'VLM' and (files or self._vlm_force_format_input_with_files):
+        if files or self._vlm_force_format_input_with_files:
             data['messages'][-1]['content'] = self._format_input_with_files(data['messages'][-1]['content'], files)
 
         proxies = {'http': None, 'https': None} if self.NO_PROXY else None
-        with requests.post(runtime_url, json=data, headers=self._header, stream=stream_output,
-                           proxies=proxies) as r:
+        with requests.post(runtime_url, json=data, headers=self._header, stream=stream_output, proxies=proxies) as r:
             if r.status_code != 200:  # request error
                 msg = '\n'.join([c.decode('utf-8') for c in r.iter_content(None)]) if stream_output else r.text
                 raise requests.RequestException(f'{r.status_code}: {msg}')
@@ -327,13 +338,18 @@ class OnlineChatModuleBase(OnlineModuleBase, LLMBase):
     def _format_input_with_files(self, query: str, query_files: list[str]) -> List[Dict[str, str]]:
         if not query_files:
             return self._format_vl_chat_query(query)
-        output = [{'type': 'text', 'text': query}]
+        output = []
         assert isinstance(query_files, list), 'query_files must be a list.'
         for file in query_files:
-            mime = None
-            if not file.startswith('http'):
-                file, mime = _image_to_base64(file)
-            output.extend(self._format_vl_chat_image_url(file, mime))
+            # Check if file is already a data URL or HTTP URL, use directly
+            if _is_base64_with_mime(file) or file.startswith('http'):
+                output.append({'type': 'image_url', 'image_url': {'url': file}})
+            else:
+                # Local file path, convert to base64
+                file_base64, mime = _image_to_base64(file)
+                output.extend(self._format_vl_chat_image_url(file_base64, mime))
+        #deepseek-ocr requires image to be the first element in the list
+        output.append({'type': 'text', 'text': query})
         return output
 
     def __repr__(self):

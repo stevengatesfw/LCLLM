@@ -371,7 +371,13 @@ def make_local_llm(base_model: str, target_path: str = '', prompt: str = '', str
                    history: Optional[List[List[str]]] = None):
     if history and not (isinstance(history, list) and all(len(h) == 2 and isinstance(h, list) for h in history)):
         raise TypeError('history must be List[List[str, str]]')
-    m = lazyllm.TrainableModule(base_model, target_path, stream=stream, return_trace=return_trace)
+    # 当提供了 URL 时，设置 trust_remote_code=False 避免下载模型
+    # 因为此时模型已经部署在远程服务上，不需要本地下载
+    trust_remote_code = url is None or url == ''
+    #debug 1205
+    lazyllm.LOG.info(f'make_local_llm----------------base_model: {base_model}, trust_remote_code: {trust_remote_code}, url: {url}')
+    m = lazyllm.TrainableModule(base_model, target_path, stream=stream, return_trace=return_trace,
+                                trust_remote_code=trust_remote_code)
     m.prompt(prompt, history=history)
     setup_deploy_method(m, deploy_method, url)
     return m
@@ -784,6 +790,12 @@ class LLM(lazyllm.ModuleBase):
         if self._keys and len(self._keys) > 1:
             assert len(args) == len(self._keys)
             args = ({k: a for k, a in zip(self._keys, args)},)
+        elif self._keys and len(self._keys) == 1:
+            # 如果只有一个 key，且输入是字典，提取对应的值；否则直接传递
+            assert len(args) == 1
+            if isinstance(args[0], dict) and self._keys[0] in args[0]:
+                args = (args[0][self._keys[0]],)
+            # 如果输入不是字典，直接传递
         else:
             assert len(args) == 1
         return self._m(*args, **kw)

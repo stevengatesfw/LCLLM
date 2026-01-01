@@ -34,7 +34,7 @@ class _StableDiffusion3(object):
             return caller_func
         return decorator
 
-    def __init__(self, base_sd, source=None, embed_batch_size=30, trust_remote_code=True, save_path=None, init=False):
+    def __init__(self, base_sd, source=None, embed_batch_size=30, trust_remote_code=True, save_path=None, init=False, num_gpus=1):
         source = lazyllm.config['model_source'] if not source else source
         self.base_sd = ModelManager(source).download(base_sd) or ''
         self.embed_batch_size = embed_batch_size
@@ -42,6 +42,7 @@ class _StableDiffusion3(object):
         self.paintor = None
         self.init_flag = lazyllm.once_flag()
         self.save_path = save_path or os.path.join(lazyllm.config['temp_dir'], 'sd3')
+        self.num_gpus = max(1, int(num_gpus)) if num_gpus else 1
         if init:
             lazyllm.call_once(self.init_flag, self.load_sd)
 
@@ -55,8 +56,15 @@ class _StableDiffusion3(object):
                 loader(self)
                 return
 
+        # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+        # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
         self.paintor = diffusers.StableDiffusion3Pipeline.from_pretrained(
-            self.base_sd, torch_dtype=torch.float16).to('cuda')
+            self.base_sd, torch_dtype=torch.float16)
+        if self.num_gpus > 1:
+            self.paintor.enable_model_cpu_offload()
+            lazyllm.LOG.info(f"Loaded StableDiffusion3Pipeline with multi-GPU support (num_gpus={self.num_gpus})")
+        else:
+            self.paintor.to('cuda')
 
     @staticmethod
     def image_to_base64(image):
@@ -102,6 +110,10 @@ class _StableDiffusion3(object):
 
     def __call__(self, string):
         lazyllm.call_once(self.init_flag, self.load_sd)
+        # 处理 dict 类型的输入，提取实际的字符串
+        if isinstance(string, dict):
+            string = string.get('inputs') or string.get('prompt') or string.get('input') or \
+                     next((v for v in string.values() if isinstance(v, str)), str(list(string.values())[0]) if string else '')
 
         for model_type, caller in self._call_registry.items():
             if model_type in self.base_sd.lower():
@@ -118,19 +130,26 @@ class _StableDiffusion3(object):
         return encode_query_with_filepaths(files=img_path_list)
 
     @classmethod
-    def rebuild(cls, base_sd, embed_batch_size, init, save_path):
-        return cls(base_sd, embed_batch_size=embed_batch_size, init=init, save_path=save_path)
+    def rebuild(cls, base_sd, embed_batch_size, init, save_path, num_gpus=1):
+        return cls(base_sd, embed_batch_size=embed_batch_size, init=init, save_path=save_path, num_gpus=num_gpus)
 
     def __reduce__(self):
         init = bool(os.getenv('LAZYLLM_ON_CLOUDPICKLE', None) == 'ON' or self.init_flag)
-        return _StableDiffusion3.rebuild, (self.base_sd, self.embed_batch_size, init, self.save_path)
+        return _StableDiffusion3.rebuild, (self.base_sd, self.embed_batch_size, init, self.save_path, self.num_gpus)
 
 @_StableDiffusion3.register_loader('flux')
 def load_flux(model):
     import torch
     from diffusers import FluxPipeline
+    # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+    # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
     model.paintor = FluxPipeline.from_pretrained(
-        model.base_sd, torch_dtype=torch.bfloat16).to('cuda')
+        model.base_sd, torch_dtype=torch.bfloat16)
+    if model.num_gpus > 1:
+        model.paintor.enable_model_cpu_offload()
+        lazyllm.LOG.info(f"Loaded FluxPipeline with multi-GPU support (num_gpus={model.num_gpus})")
+    else:
+        model.paintor.to('cuda')
 
 @_StableDiffusion3.register_caller('flux')
 def call_flux(model, prompt):
@@ -149,8 +168,15 @@ def call_flux(model, prompt):
 def load_cogview(model):
     import torch
     from diffusers import CogView4Pipeline
+    # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+    # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
     model.paintor = CogView4Pipeline.from_pretrained(
-        model.base_sd, torch_dtype=torch.bfloat16).to('cuda')
+        model.base_sd, torch_dtype=torch.bfloat16)
+    if model.num_gpus > 1:
+        model.paintor.enable_model_cpu_offload()
+        lazyllm.LOG.info(f"Loaded CogView4Pipeline with multi-GPU support (num_gpus={model.num_gpus})")
+    else:
+        model.paintor.to('cuda')
 
 @_StableDiffusion3.register_caller('cogview')
 def call_cogview(model, prompt):
@@ -168,24 +194,229 @@ def call_cogview(model, prompt):
 @_StableDiffusion3.register_loader('wan')
 def load_wan(model):
     import torch
-    from diffusers import AutoencoderKLWan, WanPipeline
+    from diffusers import WanPipeline, AutoencoderKLWan
     from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-    vae = AutoencoderKLWan.from_pretrained(
-        model.base_sd, subfolder='vae', torch_dtype=torch.float32)
+    from transformers import T5Tokenizer, T5EncoderModel
+    import os
+    
+    # tokenizer 和 text_encoder 在 google/umt5-xxl/ 子目录中
+    tokenizer_path = os.path.join(model.base_sd, 'google', 'umt5-xxl')
+    if not os.path.exists(tokenizer_path):
+        lazyllm.LOG.warning(f"Tokenizer path {tokenizer_path} does not exist, using base_sd {model.base_sd}+'/tokenizer'")
+        tokenizer_path = model.base_sd + '/tokenizer'
+    # 确保 tokenizer_path 是字符串
+    if not isinstance(tokenizer_path, str):
+        tokenizer_path = str(tokenizer_path)
+    
+    # 先手动加载 tokenizer，确保路径正确
+    # 这样可以避免 WanPipeline.from_pretrained 自动加载 tokenizer 时的路径问题
+    tokenizer = None
+    try:
+        tokenizer = T5Tokenizer.from_pretrained(tokenizer_path)
+        lazyllm.LOG.info(f"Loaded tokenizer from {tokenizer_path}")
+    except Exception as e:
+        lazyllm.LOG.warning(f"Failed to load tokenizer from {tokenizer_path}: {e}")
+        # 如果失败，尝试从根目录加载
+        try:
+            tokenizer = T5Tokenizer.from_pretrained(model.base_sd)
+            lazyllm.LOG.info(f"Loaded tokenizer from {model.base_sd}")
+        except Exception as e2:
+            lazyllm.LOG.warning(f"Failed to load tokenizer from {model.base_sd}: {e2}")
+            raise RuntimeError(f"Failed to load tokenizer: {e2}")
+    
+    # 先尝试自动加载 pipeline（不传递 tokenizer，让 pipeline 自动加载其他组件）
+    try:
+        # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+        # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
+        model.paintor = WanPipeline.from_pretrained(
+            model.base_sd, 
+            torch_dtype=torch.bfloat16)
+        if model.num_gpus > 1:
+            model.paintor.enable_model_cpu_offload()
+            lazyllm.LOG.info(f"Loaded WanPipeline with multi-GPU support (num_gpus={model.num_gpus})")
+        # 替换为我们手动加载的 tokenizer（确保路径正确）
+        if hasattr(model.paintor, 'tokenizer') and tokenizer is not None:
+            model.paintor.tokenizer = tokenizer
+            lazyllm.LOG.info("Replaced pipeline tokenizer with manually loaded tokenizer")
+            # 如果使用了 enable_model_cpu_offload，重新初始化以包含新的 tokenizer
+            if model.num_gpus > 1:
+                model.paintor.enable_model_cpu_offload()
+    except Exception as e:
+        # 如果自动加载失败，手动加载所有组件
+        lazyllm.LOG.warning(f"WanPipeline auto-loading failed: {e}, loading components manually")
+        
+        # 手动加载各个组件
+        tokenizer = T5Tokenizer.from_pretrained(tokenizer_path)
+        
+        # text_encoder 的模型文件在根目录：models_t5_umt5-xxl-enc-bf16.pth
+        # 优先使用 ModelScope，如果失败则尝试从本地权重文件直接加载
+        text_encoder_model_file = os.path.join(model.base_sd, 'models_t5_umt5-xxl-enc-bf16.pth')
+        
+        text_encoder = None
+        try:
+            # 优先尝试从 ModelScope 加载 henjicc/umt5_xxl_encoder（更适合的模型路径）
+            try:
+                from modelscope import snapshot_download
+                # 安全地获取 cache_dir，避免 KeyError
+                try:
+                    cache_dir = lazyllm.config['model_cache_dir']
+                except (KeyError, TypeError):
+                    cache_dir = None
+                modelscope_model_path = snapshot_download('henjicc/umt5_xxl_encoder', cache_dir=cache_dir)
+                text_encoder = T5EncoderModel.from_pretrained(
+                    modelscope_model_path,
+                    torch_dtype=torch.bfloat16,
+                    local_files_only=False  # 允许在下载过程中继续等待
+                )
+                lazyllm.LOG.info(f"Loaded text_encoder from ModelScope: {modelscope_model_path}")
+            except Exception as e1:
+                lazyllm.LOG.warning(f"Failed to load from ModelScope henjicc/umt5_xxl_encoder: {e1}, trying AI-ModelScope/umt5-xxl")
+                # 如果失败，尝试 AI-ModelScope/umt5-xxl
+                try:
+                    from modelscope import snapshot_download
+                    try:
+                        cache_dir = lazyllm.config['model_cache_dir']
+                    except (KeyError, TypeError):
+                        cache_dir = None
+                    modelscope_model_path = snapshot_download('AI-ModelScope/umt5-xxl', cache_dir=cache_dir)
+                    text_encoder = T5EncoderModel.from_pretrained(
+                        modelscope_model_path,
+                        torch_dtype=torch.bfloat16,
+                        local_files_only=False  # 允许在下载过程中继续等待
+                    )
+                    lazyllm.LOG.info(f"Loaded text_encoder from ModelScope: {modelscope_model_path}")
+                except Exception as e2:
+                    lazyllm.LOG.warning(f"Failed to load from ModelScope AI-ModelScope/umt5-xxl: {e2}, trying Hugging Face")
+                    # 如果 ModelScope 都失败，尝试 Hugging Face（但可能网络不可达）
+                    try:
+                        text_encoder = T5EncoderModel.from_pretrained(
+                            'google/umt5-xxl',
+                            torch_dtype=torch.bfloat16
+                        )
+                    except Exception as e3:
+                        lazyllm.LOG.warning(f"Failed to load from Hugging Face: {e3}")
+                        raise
+            
+            # 加载自定义权重文件（覆盖从 Hugging Face/ModelScope 加载的权重）
+            if os.path.exists(text_encoder_model_file):
+                lazyllm.LOG.info(f"Loading text_encoder weights from {text_encoder_model_file}")
+                state_dict = torch.load(text_encoder_model_file, map_location='cpu')
+                # 处理 state_dict 的键名（可能需要去除前缀）
+                if isinstance(state_dict, dict):
+                    # 检查是否有 'model' 或 'encoder' 前缀
+                    if any(k.startswith('model.') for k in state_dict.keys()):
+                        state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}
+                    elif any(k.startswith('encoder.') for k in state_dict.keys()):
+                        state_dict = {k.replace('encoder.', ''): v for k, v in state_dict.items()}
+                text_encoder.load_state_dict(state_dict, strict=False)
+        except Exception as e:
+            # 如果所有方法都失败，尝试直接从本地权重文件加载（需要手动创建配置）
+            lazyllm.LOG.warning(f"Failed to load text_encoder from remote: {e}, trying direct loading from local file")
+            if os.path.exists(text_encoder_model_file):
+                try:
+                    from transformers import T5Config
+                    # 尝试从本地缓存或使用默认配置
+                    # 先尝试从 google/umt5-xxl 目录加载配置（如果有）
+                    config_path = os.path.join(model.base_sd, 'google', 'umt5-xxl', 'config.json')
+                    if os.path.exists(config_path):
+                        config = T5Config.from_pretrained(config_path)
+                    else:
+                        # 使用默认的 umt5-xxl 配置参数
+                        config = T5Config(
+                            vocab_size=250112,
+                            d_model=4096,
+                            d_kv=128,
+                            d_ff=10240,
+                            num_layers=24,
+                            num_decoder_layers=24,
+                            num_heads=64,
+                            relative_attention_num_buckets=32,
+                            relative_attention_max_distance=128,
+                            dropout_rate=0.1,
+                            layer_norm_epsilon=1e-6,
+                            initializer_factor=1.0,
+                            feed_forward_proj="gated-gelu",
+                            is_encoder_decoder=True,
+                            use_cache=True,
+                            pad_token_id=0,
+                            eos_token_id=1,
+                            decoder_start_token_id=0,
+                        )
+                    text_encoder = T5EncoderModel(config)
+                    state_dict = torch.load(text_encoder_model_file, map_location='cpu')
+                    if isinstance(state_dict, dict):
+                        if any(k.startswith('model.') for k in state_dict.keys()):
+                            state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}
+                        elif any(k.startswith('encoder.') for k in state_dict.keys()):
+                            state_dict = {k.replace('encoder.', ''): v for k, v in state_dict.items()}
+                    text_encoder.load_state_dict(state_dict, strict=False)
+                    text_encoder = text_encoder.to(torch.bfloat16)
+                    lazyllm.LOG.info("Successfully loaded text_encoder from local file with default config")
+                except Exception as e2:
+                    raise RuntimeError(f"Failed to load text_encoder from local file: {e2}")
+            else:
+                raise RuntimeError(f"text_encoder model file not found: {text_encoder_model_file}")
+        
+        # 加载 VAE（尝试从 vae 子目录或根目录）
+        vae_path = os.path.join(model.base_sd, 'vae')
+        if os.path.exists(vae_path):
+            vae = AutoencoderKLWan.from_pretrained(
+                model.base_sd, subfolder='vae', torch_dtype=torch.float32)
+        else:
+            # 尝试从根目录加载 VAE
+            try:
+                vae = AutoencoderKLWan.from_pretrained(
+                    model.base_sd, torch_dtype=torch.float32)
+            except Exception:
+                vae = None
+        
+        # 加载 pipeline，先尝试完全自动加载（不传递任何组件）
+        # 如果自动加载失败，再尝试传递已加载的组件
+        try:
+            # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+            # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
+            model.paintor = WanPipeline.from_pretrained(
+                model.base_sd,
+                torch_dtype=torch.bfloat16)
+            if model.num_gpus > 1:
+                model.paintor.enable_model_cpu_offload()
+                lazyllm.LOG.info(f"Loaded WanPipeline with multi-GPU support (num_gpus={model.num_gpus})")
+            # 如果自动加载成功，替换 tokenizer 和 text_encoder 为我们手动加载的版本
+            if hasattr(model.paintor, 'tokenizer') and tokenizer is not None:
+                model.paintor.tokenizer = tokenizer
+            if hasattr(model.paintor, 'text_encoder') and text_encoder is not None:
+                model.paintor.text_encoder = text_encoder
+            if hasattr(model.paintor, 'vae') and vae is not None:
+                model.paintor.vae = vae
+            # 如果使用了 enable_model_cpu_offload，重新初始化以包含替换的组件
+            if model.num_gpus > 1:
+                model.paintor.enable_model_cpu_offload()
+        except Exception as e:
+            lazyllm.LOG.warning(f"WanPipeline auto-loading failed: {e}, trying with manual components")
+            # 如果自动加载失败，尝试传递所有已加载的组件
+            # 但需要确保所有必需组件都已加载
+            raise RuntimeError(f"Failed to load WanPipeline: {e}. Please ensure all model files are downloaded.")
+    
+    # 设置自定义 scheduler
     scheduler = UniPCMultistepScheduler(
         prediction_type='flow_prediction',
         use_flow_sigmas=True,
         num_train_timesteps=1000,
         flow_shift=3.0
     )
-    model.paintor = WanPipeline.from_pretrained(
-        model.base_sd, vae=vae, torch_dtype=torch.bfloat16)
     model.paintor.scheduler = scheduler
-    model.paintor.to('cuda')
+    # 多 GPU 时，如果使用了 enable_model_cpu_offload，则不需要手动 to('cuda')
+    # enable_model_cpu_offload 会自动管理设备分配
+    if model.num_gpus <= 1:
+        model.paintor.to('cuda')
 
 @_StableDiffusion3.register_caller('wan')
 def call_wan(model, prompt):
     from diffusers.utils import export_to_video
+    # 确保 prompt 是字符串或列表类型（dict 已在 __call__ 中处理）
+    if not isinstance(prompt, (str, list)):
+        prompt = str(prompt)
+    
     videos = model.paintor(
         prompt,
         negative_prompt=(
@@ -215,6 +446,12 @@ class StableDiffusionDeploy(LazyLLMDeployBase):
     keys_name_handle = None
     default_headers = {'Content-Type': 'application/json'}
 
+    @staticmethod
+    def extract_result(x, inputs):
+        # StableDiffusion 通过 RelayServer 返回，已经是 encode_query_with_filepaths 格式的字符串
+        # 不需要像 Vllm 那样解析 JSON，直接返回即可
+        return x
+
     def __init__(self, launcher: Optional[LazyLLMLaunchersBase] = None,
                  log_path: Optional[str] = None, trust_remote_code: bool = True, port: Optional[int] = None, **kw):
         super().__init__(launcher=launcher)
@@ -231,5 +468,8 @@ class StableDiffusionDeploy(LazyLLMDeployBase):
             LOG.warning(f'Note! That finetuned_model({finetuned_model}) is an invalid path, '
                         f'base_model({base_model}) will be used')
             finetuned_model = base_model
-        return lazyllm.deploy.RelayServer(port=self._port, func=_StableDiffusion3(finetuned_model),
+        # 从 launcher 获取 GPU 数量（如果可用）
+        num_gpus = getattr(self._launcher, 'ngpus', 1) if self._launcher else 1
+        num_gpus = max(1, int(num_gpus)) if num_gpus else 1
+        return lazyllm.deploy.RelayServer(port=self._port, func=_StableDiffusion3(finetuned_model, num_gpus=num_gpus),
                                           launcher=self._launcher, log_path=self._log_path, cls='stable_diffusion')()

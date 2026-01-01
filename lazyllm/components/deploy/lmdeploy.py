@@ -2,6 +2,7 @@ import os
 import json
 import random
 import importlib.util
+from typing import Optional
 
 import lazyllm
 from lazyllm import launchers, LazyLLMCMD, ArgsDict, LOG, config
@@ -33,7 +34,7 @@ class LMDeploy(LazyLLMDeployBase):
     }
     stream_parse_parameters = {'delimiter': b'\n'}
 
-    def __init__(self, launcher=launchers.remote(ngpus=1), trust_remote_code=True, log_path=None, **kw):  # noqa B008
+    def __init__(self, launcher=launchers.remote(ngpus=1), trust_remote_code=True, log_path=None, conda_env=None, openai_api: Optional[bool] = None, **kw):  # noqa B008
         super().__init__(launcher=launcher)
         self.kw = ArgsDict({
             'server-name': '0.0.0.0',
@@ -46,7 +47,19 @@ class LMDeploy(LazyLLMDeployBase):
         self._trust_remote_code = trust_remote_code
         self.random_port = False if 'server-port' in kw and kw['server-port'] else True
         self.temp_folder = make_log_dir(log_path, 'lmdeploy') if log_path else None
-
+        # 支持指定 conda 环境（用于多环境方案，解决依赖版本冲突,默认 Python 环境（lcagent-core））
+        # 其他conda环境配置方式：
+        # 在 model_directory.py 的 MODEL_DEPLOY_CONFIG 中添加：
+        #    MODEL_DEPLOY_CONFIG = {
+        #        'model-name': {
+        #            'conda_env': 'lcagent-lmdeploy',  # 指定使用的 conda 环境
+        #            'openai_api': True,  # 使用 OpenAI 兼容格式
+        #        }
+        #    }
+        self._conda_env = conda_env
+        if self._conda_env:
+            LOG.info(f'LMDeploy will use conda environment: {self._conda_env}')
+            
     def cmd(self, finetuned_model=None, base_model=None):
         if not os.path.exists(finetuned_model) or \
             not any(filename.endswith('.bin') or filename.endswith('.safetensors')
@@ -59,7 +72,20 @@ class LMDeploy(LazyLLMDeployBase):
         def impl():
             if self.random_port:
                 self.kw['server-port'] = random.randint(30000, 40000)
-            cmd = f'lmdeploy serve api_server {finetuned_model} --model-name lazyllm '
+
+            import sys
+            
+            # 根据 conda_env 参数选择 Python 解释器路径
+            if self._conda_env:
+                # 使用指定 conda 环境的 Python
+                python_path = f'/opt/conda/envs/{self._conda_env}/bin/python'
+                LOG.info(f'Using conda environment Python: {python_path}')
+            else:
+                # 使用默认 Python（当前环境的 sys.executable）
+                python_path = sys.executable
+                LOG.debug(f'Using default Python: {python_path}')
+            
+            cmd = f'{python_path} -m lmdeploy serve api_server {finetuned_model} '
 
             if importlib.util.find_spec('torch_npu') is not None: cmd += '--device ascend '
             if config['lmdeploy_eager_mode']: cmd += '--eager-mode '

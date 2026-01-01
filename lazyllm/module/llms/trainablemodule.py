@@ -83,10 +83,11 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
         #                    Then support Option for base_model
         base_model = base_model.rstrip('/\\')
         self._type = LLMType(type) if type else type
+        lazyllm.LOG.info(f'_TrainableModuleImpl-----------------------base_model: {base_model}, trust_remote_code: {trust_remote_code}')
         self._base_model = (ModelManager(source or lazyllm.config['model_source']).download(base_model) or ''
                             if trust_remote_code else base_model)
         if not self._base_model:
-            LOG.warning(f'Cannot get a valid model from {base_model} by ModelManager.')
+            lazyllm.LOG.warning(f'Cannot get a valid model from {base_model} by ModelManager.')
         self._target_path = os.path.join(lazyllm.config['train_target_root'], target_path)
         self._stream = stream
         self._launchers: Dict[str, Dict[str, Launcher]] = dict(default=dict(), manual=dict())
@@ -98,7 +99,9 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
         self._template = template
         self._use_model_map = use_model_map
         _UrlHelper.__init__(self, url=url_wrapper)
-        if base_model and deploy: self.deploy_method(deploy)
+        # 初始化self._deploy属性，确保始终有值
+        self._deploy = None
+        if deploy: self.deploy_method(deploy)
         self._prepare_deploy = lambda target_path, base_model: lazyllm.package(target_path, base_model)
 
     def _get_train_or_deploy_args(self, arg_cls: str, disable: List[str] = []):  # noqa B006
@@ -107,12 +110,23 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
             raise ValueError(f'Key `{", ".join(disable)}` can not be set in '
                              '{arg_cls}_args, please pass them from Module.__init__()')
 
+        # 如果 self._deploy 是 AutoDeploy，需要先调用 get_deployer 来确定正确的部署类型
+        # 即使 args 中有 url，也应该先确定部署类型，因为 url 可能是之前调用时设置的
+        if arg_cls == 'deploy' and self._deploy is lazyllm.deploy.AutoDeploy:
+            saved_url = args.get('url')
+            self._deploy, args['launcher'], self._deploy_args = lazyllm.deploy.AutoDeploy.get_deployer(
+                base_model=self._base_model, type=self._type, **{k: v for k, v in args.items() if k != 'url'})
+            # 重要：get_deployer 返回的 self._deploy_args 包含了从 MODEL_DEPLOY_CONFIG 中获取的配置（如 openai_api）
+            # 需要将 self._deploy_args 的内容合并到 args 中，确保返回值包含这些配置
+            args.update(self._deploy_args)
+            # 如果之前有保存的 url，恢复它并只保留 url（满足断言要求）
+            if saved_url:
+                args = {'url': saved_url}
+        
         if not args.get('url'):
-            if arg_cls == 'deploy' and self._deploy is lazyllm.deploy.AutoDeploy:
-                self._deploy, args['launcher'], self._deploy_args = lazyllm.deploy.AutoDeploy.get_deployer(
-                    base_model=self._base_model, type=self._type, **args)
             args['launcher'] = args['launcher'].clone() if args.get('launcher') else launchers.remote(sync=False)
             self._launchers['default'][arg_cls] = args['launcher']
+
         return args
 
     def _get_train_tasks_impl(self, mode: Optional[str] = None, **kw):
@@ -199,26 +213,26 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
 
     def _deploy_setter_hook(self):
         self._deploy_args = self._get_train_or_deploy_args('deploy', disable=['target_path'])
-
+        
         if hasattr(self._deploy, 'auto_map') and self._deploy.auto_map:
             self._deploy_args = map_kw_for_framework(self._deploy_args, self._deploy.auto_map)
 
         trainable_module_config_map = get_trainable_module_config_map(
             lazyllm.config['trainable_module_config_map_path']) if self._use_model_map else {}
-
         base_model_name = os.path.basename(self._base_model)
         if base_model_name in trainable_module_config_map:
             deploy_args_for_check = {k: v for k, v in self._deploy_args.items() if k not in ignore_config_keys}
-            for module_config in trainable_module_config_map[base_model_name]:
+            for idx, module_config in enumerate(trainable_module_config_map[base_model_name]):
                 if (not deploy_args_for_check and not module_config.get('strict')) \
                         or not deepdiff.DeepDiff(module_config.get('deploy_config', {}), deploy_args_for_check):
                     try:
                         url = module_config.get('url')
                         requests.get(url, timeout=3)
                         self._deploy_args = {'url': url}
-                        self._deploy = getattr(lazyllm.deploy, module_config.get('framework'))
+                        framework = module_config.get('framework')
+                        self._deploy = getattr(lazyllm.deploy, framework)
                         break
-                    except Exception:
+                    except Exception as e:
                         continue
 
         stop_words = ModelManager.get_model_prompt_keys(self._base_model).get('stop_words')
@@ -230,6 +244,27 @@ class _TrainableModuleImpl(ModuleBase, _UrlHelper):
 
         if url := self._deploy_args.get('url'):
             assert len(self._deploy_args) == 1, 'Cannot provide other arguments together with url'
+            # 根据 URL 判断应该使用哪个 framework 的格式
+            # 如果 URL 包含 /v1/chat/interactive，使用 LMDeploy 格式
+            # 如果 URL 包含 /generate，需要进一步判断：
+            #   - 如果当前是 StableDiffusionDeploy，保持使用 StableDiffusionDeploy 的 extract_result
+            #   - 否则使用 Vllm 格式
+            if '/v1/chat/interactive' in url:
+                if self._deploy is not lazyllm.deploy.LMDeploy:
+                    self._deploy = lazyllm.deploy.LMDeploy
+                    self._template.update(self._deploy.message_format, self._deploy.keys_name_handle,
+                                          self._deploy.default_headers, extract_result=self._deploy.extract_result,
+                                          stream_parse_parameters=self._deploy.stream_parse_parameters,
+                                          stream_url_suffix=self._deploy.stream_url_suffix, stop_words=stop_words)
+            elif '/generate' in url:
+                # 如果当前是 StableDiffusionDeploy，不要切换到 Vllm
+                if self._deploy is not lazyllm.deploy.Vllm and self._deploy is not lazyllm.deploy.StableDiffusionDeploy:
+                    self._deploy = lazyllm.deploy.Vllm
+                # 统一更新 template（无论是 Vllm 还是 StableDiffusionDeploy）
+                self._template.update(self._deploy.message_format, self._deploy.keys_name_handle,
+                                      self._deploy.default_headers, extract_result=self._deploy.extract_result,
+                                      stream_parse_parameters=self._deploy.stream_parse_parameters,
+                                      stream_url_suffix=self._deploy.stream_url_suffix, stop_words=stop_words)
             self._set_url(re.sub(r'v1(?:/chat/completions)?/?$', 'v1/', url))
             self._get_deploy_tasks.flag.set(ignore_reset=True)
         self._deploy_args.pop('url', None)
@@ -530,6 +565,7 @@ class TrainableModule(UrlModule):
 
     def forward_openai(self, __input: Union[Tuple[Union[str, Dict], str], str, Dict] = package(),  # noqa B008
                        *, llm_chat_history=None, lazyllm_files=None, tools=None, stream_output=False, **kw):
+        LOG.info(f'forward_openai: url={self._url}, lazyllm_files={lazyllm_files}, type={self.type}, __input type={type(__input)}')
         if not getattr(self, '_openai_module', None):
             model_type = self.type.lower()
             if model_type in ['llm', 'vlm']:
@@ -537,7 +573,7 @@ class TrainableModule(UrlModule):
                     source='openai', model='lazyllm', base_url=self._url, skip_auth=True, type=model_type,
                     stream=self._stream).share(prompt=self._prompt, format=self._formatter)
                 self._openai_module._prompt._set_model_configs(
-                    system='You are LazyLLM, a large language model developed by SenseTime.'
+                    system='You are LazyLLM, a large language model developed by LcAgent.'
                 )
             elif model_type in ['embed', 'rerank']:
                 self._openai_module = lazyllm.OnlineEmbeddingModule(
@@ -553,9 +589,16 @@ class TrainableModule(UrlModule):
         __input, files = self._get_files(__input, lazyllm_files)
         text_input_for_token_usage = __input = self._prompt.generate_prompt(__input, llm_chat_history, tools)
         url = self._url
-
         if self.template_message:
-            data = self._modify_parameters(copy.deepcopy(self.template_message), kw, optional_keys='modality')
+            # 允许所有在 template_message 中的键，以及常见的推理参数
+            template_keys = list(self.template_message.keys()) if self.template_message else []
+            # 如果使用 LMDeploy 且传入 max_tokens，需要映射到 max_new_tokens
+            if 'max_new_tokens' in template_keys and 'max_tokens' in kw:
+                kw['max_new_tokens'] = kw.pop('max_tokens')
+            allowed_keys = template_keys + ['modality', 'temperature', 'top_p', 'max_tokens', 'max_new_tokens', 'stream', 'skip_special_tokens', 'extra_args']
+            # 去重，保持顺序
+            allowed_keys = list(dict.fromkeys(allowed_keys))
+            data = self._modify_parameters(copy.deepcopy(self.template_message), kw, optional_keys=allowed_keys)
             data[self.keys_name_handle.get('inputs', 'inputs')] = __input
             if files and (keys := list(set(self.keys_name_handle).intersection(LazyLLMDeployBase.encoder_map.keys()))):
                 assert len(keys) == 1, 'Only one key is supported for encoder_mapping'
@@ -586,19 +629,25 @@ class TrainableModule(UrlModule):
         parse_parameters = self.stream_parse_parameters if stream_output else {'delimiter': b'<|lazyllm_delimiter|>'}
 
         # context bug with httpx, so we use requests
+        LOG.debug(f'Making request to {url} with stream={stream_output}, parse_parameters={parse_parameters}')
         with requests.post(url, json=data, stream=True, headers=headers, proxies={'http': None, 'https': None}) as r:
+            LOG.debug(f'Request response status: {r.status_code}')
             if r.status_code != 200:
                 raise requests.RequestException('\n'.join([c.decode('utf-8') for c in r.iter_content(None)]))
 
             messages, cache = '', ''
             token = getattr(self, '_tool_start_token', '')
             color = stream_output.get('color') if isinstance(stream_output, dict) else None
+            line_count = 0
 
             for line in r.iter_lines(**parse_parameters):
+                line_count += 1
                 if not line: continue
                 line = self._decode_line(line)
-
-                chunk = self._prompt.get_response(self.extract_result_func(line, data))
+                LOG.info(f'Received line {line_count}: {line[:100] if len(str(line)) > 100 else line}')
+                extracted = self.extract_result_func(line, data)
+                LOG.info(f'extract_result_func returned: type={type(extracted)}, content (first 200 chars)={str(extracted)[:200]}')
+                chunk = self._prompt.get_response(extracted, input=text_input if isinstance(text_input, str) else None)
                 chunk = chunk[len(messages):] if isinstance(chunk, str) and chunk.startswith(messages) else chunk
                 messages = chunk if not isinstance(chunk, str) else messages + chunk
 
@@ -611,22 +660,31 @@ class TrainableModule(UrlModule):
                     cache += chunk
                     if not self._maybe_has_fc(token, cache): cache = self._stream_output(cache, color)
 
+            LOG.debug(f'Request completed, received {line_count} lines, messages length: {len(messages)}')
             if text_input: self._record_usage(text_input, messages)
             temp_output = self._extract_and_format(messages)
             return self._formatter(temp_output)
 
     def _modify_parameters(self, paras: dict, kw: dict, *, optional_keys: Union[List[str], str] = None):
+        # 先处理 optional_keys，确保它是列表格式
+        optional_keys_list = [optional_keys] if isinstance(optional_keys, str) else (optional_keys or [])
+        
         for key, value in paras.items():
             if key == self.keys_name_handle['inputs']: continue
             elif isinstance(value, dict):
                 if key in kw:
                     assert set(kw[key].keys()).issubset(set(value.keys()))
                     value.update(kw.pop(key))
-                else: [setattr(value, k, kw.pop(k)) for k in value.keys() if k in kw]
-            elif key in kw: paras[key] = kw.pop(key)
+                else: 
+                    # 从 kw 中移除所有在 value.keys() 中的键，并更新到 value 中
+                    for k in list(value.keys()):
+                        if k in kw:
+                            value[k] = kw.pop(k)
+            elif key in kw: 
+                paras[key] = kw.pop(key)
 
-        optional_keys = [optional_keys] if isinstance(optional_keys, str) else (optional_keys or [])
-        assert set(kw.keys()).issubset(set(optional_keys)), f'{kw.keys()} is not in {optional_keys}'
+        # 检查剩余的 kw 是否都在 optional_keys 中
+        assert set(kw.keys()).issubset(set(optional_keys_list)), f'{kw.keys()} is not in {optional_keys_list}'
         paras.update(kw)
         return paras
 
@@ -645,3 +703,9 @@ class TrainableModule(UrlModule):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._impl._base_model = state['base_model']
+
+
+
+
+
+

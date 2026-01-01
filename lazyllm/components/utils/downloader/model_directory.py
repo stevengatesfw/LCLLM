@@ -8,9 +8,9 @@ from lazyllm import LOG
 # Special Model Matching
 
 special_models = {
-    'llm': {'minicpm-2b-dpo-bf16'},
+    'llm': {'minicpm-2b-dpo-bf16', 'deepseek-ocr'},
     'vlm': {
-        'aria', 'r-4b', 'step3', 'deepseek-ocr', 'emu3-chat-hf', 'granite-speech-3.3-8b', 'idefics3-8b-llama3',
+        'aria', 'r-4b', 'step3', 'emu3-chat-hf', 'granite-speech-3.3-8b', 'idefics3-8b-llama3',
         'phi-4-multimodal-instruct', 'qwen2-audio-7b-instruct', 'mistral-small-3.1-24b-instruct-2503',
         'llava-next-video-7b-hf'},
     'stt': {},
@@ -125,3 +125,23 @@ def infer_model_type(model_name: str) -> str:
             continue
     LOG.warning(f'Cannot classify model type for: {model_name}. Defaulting to "llm" instead.')
     return 'llm'
+
+
+# Model Deploy Configuration
+# 模型部署配置：为特定模型配置部署参数（如 logits_processors）
+# 配置格式：{模型名称（小写）: {部署参数键: 部署参数值}}
+MODEL_DEPLOY_CONFIG = {
+    'deepseek-ocr': {
+        # 'logits_processors': 'vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor',  #TODO: 临时注释掉，官方没有vllm服务器形式的传参方法，部分图片识别不准不知道是不是这个原因
+        # message_format={
+        #     'extra_args': {
+        #         'ngram_size': 30,
+        #         'window_size': 90,
+        #         'whitelist_token_ids': {128821, 128822}
+        #     }
+        # } #同上
+        'openai_api': True,  # 使用 OpenAI API 模式，支持多模态输入（图片等）
+        'max_model_len': 5120,  # 降低最大序列长度以减少显存占用（从默认10240降到5120，给输入tokens留出空间）
+        'gpu_memory_utilization': 0.7,  # 降低显存利用率（从默认0.9降到0.7），减少KV cache预分配
+    }
+}

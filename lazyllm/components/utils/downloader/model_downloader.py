@@ -142,7 +142,8 @@ class ModelManager():
         model = model_base.lower()
         if model in model_name_mapping.keys():
             return
-        matched_model_prefix = next((key for key in model_provider if model.startswith(key)), None)
+        # Match longer prefixes first to avoid matching 'llama' when 'llama-3' or 'meta-llama' should match
+        matched_model_prefix = next((key for key in sorted(model_provider.keys(), key=len, reverse=True) if model.startswith(key)), None)
         if matched_model_prefix:
             matching_keys = [key for key in model_groups.keys() if key in model]
             if matching_keys:
@@ -183,7 +184,8 @@ class ModelManager():
 
             if '/' not in model_name_for_download:
                 # Try to figure out a possible model provider
-                matched_model_prefix = next((key for key in model_provider if model.lower().startswith(key)), None)
+                # Match longer prefixes first to avoid matching 'llama' when 'llama-3' or 'meta-llama' should match
+                matched_model_prefix = next((key for key in sorted(model_provider.keys(), key=len, reverse=True) if model.lower().startswith(key)), None)
                 if matched_model_prefix and self.model_source in model_provider[matched_model_prefix]:
                     model_name_for_download = model_provider[matched_model_prefix][self.model_source] + '/' + model
 

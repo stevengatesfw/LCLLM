@@ -1,4 +1,5 @@
 import importlib
+import os
 import toml
 import re
 import lazyllm
@@ -149,8 +150,9 @@ def load_toml_dep_group(group_name: str) -> List[str]:
         with open(toml_file_path, 'r') as f:
             return toml.load(f)['tool']['poetry']['extras'][group_name]
     except FileNotFoundError:
-        LOG.error('pyproject.toml is missing. Please reinstall LazyLLM.')
-        raise FileNotFoundError('pyproject.toml is missing. Please reinstall LazyLLM.')
+        # 在已安装的包中，pyproject.toml 可能不存在，优雅降级
+        LOG.warning(f'pyproject.toml is missing. Skipping dependency check for group "{group_name}".')
+        return []
     except KeyError:
         LOG.error(f'Group {group_name} not found in pyproject.toml.')
         raise KeyError(f'''Group {group_name} not found in pyproject.toml.

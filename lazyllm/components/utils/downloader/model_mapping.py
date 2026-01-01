@@ -97,6 +97,10 @@ model_provider = {
         'huggingface': 'meta-llama',
         'modelscope': 'AI-ModelScope'
     },
+    'llama-3': {  # Support llama-3-* models (should use meta-llama provider)
+        'huggingface': 'meta-llama',
+        'modelscope': 'LLM-Research'
+    },
     'llama': {
         'huggingface': 'meta-llama',
         'modelscope': 'modelscope'

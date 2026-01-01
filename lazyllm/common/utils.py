@@ -135,13 +135,37 @@ class SecurityVisitor(ast.NodeVisitor):  # noqa C901
         self.generic_visit(node)
 
 def compile_func(func_code: str, global_env: Optional[Dict[str, Any]] = None) -> Callable:
-    fname = re.search(r'def\s+(\w+)\s*\(', func_code).group(1)
+    #fname = re.search(r'def\s+(\w+)\s*\(', func_code).group(1)
+    import logging
+    LOG = logging.getLogger("lazyllm")
+    LOG.info(f"[DEBUG_COMPILE] 准备编译代码, 长度: {len(func_code)}")
+    
+    # 修复逻辑：获取所有定义的函数名，优先匹配 'main'
+    all_fnames = re.findall(r'def\s+(\w+)\s*\(', func_code)
+    if not all_fnames:
+        LOG.error(f"[DEBUG_COMPILE] 未找到任何函数定义")
+        raise ValueError("No function definition found in code")
+    
+    fname = 'main' if 'main' in all_fnames else all_fnames[0]
+    LOG.info(f"[DEBUG_COMPILE] 识别到所有函数: {all_fnames}, 选定入口函数: {fname}")
+    
     module = ast.parse(func_code)
     SecurityVisitor().visit(module)
     func = compile(module, filename='<ast>', mode='exec')
     local_dict = {}
     exec(func, global_env if global_env is not None else local_dict, local_dict)
-    return local_dict.pop(fname)
+    f = local_dict.pop(fname)
+
+    def wrapped_func(*args, **kwargs):
+        try:
+            res = f(*args, **kwargs)
+            LOG.info(f"[compile_func] 函数 {fname} 返回类型: {type(res)}, 内容预览: {str(res)[:100]}")
+            return res
+        except Exception as e:
+            LOG.error(f"[compile_func] 函数 {fname} 内部崩溃: {e}")
+            raise
+
+    return wrapped_func
 
 def obj2str(obj: Any) -> str:
     return base64.b64encode(pickle.dumps(obj)).decode('utf-8')

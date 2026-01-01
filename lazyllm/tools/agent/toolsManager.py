@@ -317,12 +317,17 @@ class ToolManager(ModuleBase):
         assert any('function' in tool and 'name' in tool['function'] and 'arguments' in tool['function']
                    for tool in tools), f'The tool call format is invalid; expected: {TOOL_CALL_FORMAT_EXAMPLE}'
 
-        tool_arguments = [
-            json.loads(t['function']['arguments'])
-            if isinstance(t['function']['arguments'], str)
-            else t['function']['arguments']
-            for t in tools
-        ]
+        tool_arguments = []
+        for t in tools:
+            args_str = t['function']['arguments']
+            if isinstance(args_str, str):
+                try:
+                    tool_arguments.append(json.loads(args_str))
+                except Exception as e:
+                    LOG.error(f"ToolManager.forward: JSON 解析失败: {e}")
+                    raise
+            else:
+                tool_arguments.append(args_str)
 
         tools_calls = []
         for idx, tool in enumerate(tools):
@@ -333,5 +338,4 @@ class ToolManager(ModuleBase):
             )
 
         tool_diverter = lazyllm.diverter(tuple(tools_calls))
-        tool_results = tool_diverter(tuple(tool_arguments))
-        return tool_results
+        return tool_diverter(tuple(tool_arguments))
