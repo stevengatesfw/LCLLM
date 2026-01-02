@@ -43,8 +43,12 @@ class _DeepSeekOCR(object):
 
     def _load_model(self):
         # 使用 vLLM 官方支持的 DeepSeek-OCR 多模态推理接口，避免 transformers 版本冲突
-        from vllm import LLM
-        from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+        try:
+            from vllm import LLM
+            from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+        except ImportError as e:
+            lazyllm.LOG.error(f'DeepSeekOCR: Failed to import vLLM or NGramPerReqLogitsProcessor: {e}')
+            raise RuntimeError(f'DeepSeekOCR requires vLLM with DeepSeek-OCR support. Import error: {e}') from e
 
         self._logits_processors = [
             NGramPerReqLogitsProcessor,
@@ -56,17 +60,23 @@ class _DeepSeekOCR(object):
         gpu_mem_util = float(os.getenv("DEEPSEEK_OCR_GPU_MEMORY_UTILIZATION", "0.5"))
         max_model_len = int(os.getenv("DEEPSEEK_OCR_MAX_MODEL_LEN", "4096"))
 
-        self._llm = LLM(
-            model=self.model_name_or_path,
-            enable_prefix_caching=enable_prefix_caching,
-            mm_processor_cache_gb=mm_processor_cache_gb,
-            logits_processors=[NGramPerReqLogitsProcessor],
-            gpu_memory_utilization=gpu_mem_util,
-            max_model_len=max_model_len,
-            # 当前环境 torch==2.9.0 时，vLLM 的 torch.compile 路径会触发 torch._dynamo 不支持的 builtin，
-            # 导致 EngineCore 初始化失败；强制 eager 可稳定启动。
-            enforce_eager=True,
-        )
+        lazyllm.LOG.info(f'DeepSeekOCR: Loading model from {self.model_name_or_path}')
+        try:
+            self._llm = LLM(
+                model=self.model_name_or_path,
+                enable_prefix_caching=enable_prefix_caching,
+                mm_processor_cache_gb=mm_processor_cache_gb,
+                logits_processors=[NGramPerReqLogitsProcessor],
+                gpu_memory_utilization=gpu_mem_util,
+                max_model_len=max_model_len,
+                # 当前环境 torch==2.9.0 时，vLLM 的 torch.compile 路径会触发 torch._dynamo 不支持的 builtin，
+                # 导致 EngineCore 初始化失败；强制 eager 可稳定启动。
+                enforce_eager=True,
+            )
+            lazyllm.LOG.info('DeepSeekOCR: Model loaded successfully')
+        except Exception as e:
+            lazyllm.LOG.error(f'DeepSeekOCR: Failed to load model: {e}', exc_info=True)
+            raise
 
     def __call__(self, input_data):
         lazyllm.call_once(self.init_flag, self._load_model)
@@ -168,14 +178,19 @@ class _DeepSeekOCR(object):
                 {"prompt": self.prompt, "multi_modal_data": {"image": image}}
             )
 
-        outputs = self._llm.generate(model_input, sampling_param)
-        texts = []
-        for out in outputs:
-            try:
-                texts.append(out.outputs[0].text)
-            except Exception:
-                texts.append(str(out))
-        return "\n\n".join(texts)
+        try:
+            outputs = self._llm.generate(model_input, sampling_param)
+            texts = []
+            for out in outputs:
+                try:
+                    texts.append(out.outputs[0].text)
+                except Exception as e:
+                    lazyllm.LOG.warning(f'DeepSeekOCR: Failed to extract text from output: {e}, output: {out}')
+                    texts.append(str(out))
+            return "\n\n".join(texts)
+        except Exception as e:
+            lazyllm.LOG.error(f'DeepSeekOCR: Generation failed: {e}', exc_info=True)
+            raise
 
     @classmethod
     def rebuild(cls, *args, **kw):
