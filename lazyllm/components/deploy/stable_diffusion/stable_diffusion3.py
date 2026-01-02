@@ -58,25 +58,129 @@ class _StableDiffusion3(object):
 
         # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
         # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
-        self.paintor = diffusers.StableDiffusion3Pipeline.from_pretrained(
-            self.base_sd, torch_dtype=torch.float16)
-        if self.num_gpus > 1:
-            self.paintor.enable_model_cpu_offload()
-            lazyllm.LOG.info(f"Loaded StableDiffusion3Pipeline with multi-GPU support (num_gpus={self.num_gpus})")
-        else:
-            self.paintor.to('cuda')
+        try:
+            lazyllm.LOG.info(f"Loading StableDiffusion3Pipeline from {self.base_sd}")
+            self.paintor = diffusers.StableDiffusion3Pipeline.from_pretrained(
+                self.base_sd, torch_dtype=torch.float16)
+            lazyllm.LOG.info(f"Pipeline loaded successfully, checking components...")
+            # 检查关键组件是否已加载
+            components = ['transformer', 'vae', 'text_encoder', 'tokenizer']
+            for comp in components:
+                if hasattr(self.paintor, comp):
+                    comp_obj = getattr(self.paintor, comp)
+                    if comp_obj is not None:
+                        lazyllm.LOG.info(f"Component '{comp}' loaded: {type(comp_obj).__name__}")
+                    else:
+                        lazyllm.LOG.warning(f"Component '{comp}' is None!")
+                else:
+                    lazyllm.LOG.warning(f"Component '{comp}' not found in pipeline!")
+            if self.num_gpus > 1:
+                self.paintor.enable_model_cpu_offload()
+                lazyllm.LOG.info(f"Loaded StableDiffusion3Pipeline with multi-GPU support (num_gpus={self.num_gpus})")
+            else:
+                self.paintor.to('cuda')
+                lazyllm.LOG.info(f"Pipeline moved to cuda")
+        except (ValueError, AttributeError) as e:
+            # 如果 StableDiffusion3Pipeline 加载失败，尝试 ZImagePipeline
+            lazyllm.LOG.warning(f"Failed to load StableDiffusion3Pipeline: {e}, trying ZImagePipeline")
+            try:
+                from diffusers import ZImagePipeline
+                # 根据官方文档，使用 bfloat16 以获得最佳性能，并设置 low_cpu_mem_usage=False
+                self.paintor = ZImagePipeline.from_pretrained(
+                    self.base_sd,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=False,
+                )
+                if self.num_gpus > 1:
+                    self.paintor.enable_model_cpu_offload()
+                    lazyllm.LOG.info(f"Loaded ZImagePipeline with multi-GPU support (num_gpus={self.num_gpus})")
+                else:
+                    self.paintor.to('cuda')
+            except Exception as e2:
+                lazyllm.LOG.error(f"Failed to load ZImagePipeline: {e2}")
+                raise
+
+    @staticmethod
+    def _validate_and_fix_images(images):
+        """验证和修复图像，确保没有 NaN 或 inf 值"""
+        if not images:
+            lazyllm.LOG.error("No images generated!")
+            return []
+        fixed_images = []
+        for idx, img in enumerate(images):
+            if img is None:
+                lazyllm.LOG.error(f"Image {idx} is None!")
+                continue
+            if isinstance(img, PIL.Image.Image):
+                # 转换为 numpy 数组进行检查
+                img_array = np.array(img)
+                # 检查图像统计信息
+                img_min, img_max = img_array.min(), img_array.max()
+                img_mean = img_array.mean()
+                img_std = img_array.std()
+                lazyllm.LOG.info(f"Image {idx}: size={img.size}, mode={img.mode}, min={img_min}, max={img_max}, mean={img_mean:.2f}, std={img_std:.2f}")
+                
+                # 检查是否有 NaN 或 inf
+                if np.any(np.isnan(img_array)) or np.any(np.isinf(img_array)):
+                    lazyllm.LOG.warning(f"Image {idx} contains NaN or inf values, fixing...")
+                    # 将 NaN 和 inf 替换为 0
+                    img_array = np.nan_to_num(img_array, nan=0.0, posinf=255.0, neginf=0.0)
+                    # 确保值在有效范围内
+                    img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+                    img = PIL.Image.fromarray(img_array)
+                # 如果图像值范围异常（全黑或全白），记录警告
+                elif img_max == 0:
+                    lazyllm.LOG.error(f"Image {idx} appears to be all black (max=0). This indicates a generation failure.")
+                    lazyllm.LOG.error(f"Image stats: size={img.size}, mode={img.mode}, min={img_min}, max={img_max}, mean={img_mean:.2f}, std={img_std:.2f}")
+                    # 不抛出异常，继续处理，让调用者决定如何处理
+                elif img_min == 255:
+                    lazyllm.LOG.warning(f"Image {idx} appears to be all white (min=255)")
+                # 检查图像是否异常小（可能是生成失败）
+                elif img_max - img_min < 10 and img_mean < 5:
+                    lazyllm.LOG.warning(f"Image {idx} has very low variance (max-min={img_max-img_min}, mean={img_mean:.2f}), may be invalid")
+                # 确保图像是 RGB 模式
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                fixed_images.append(img)
+            else:
+                lazyllm.LOG.warning(f"Image {idx} is not a PIL.Image.Image, type={type(img)}")
+                fixed_images.append(img)
+        return fixed_images
 
     @staticmethod
     def image_to_base64(image):
         if isinstance(image, PIL.Image.Image):
+            # 确保图像是 RGB 模式
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
             buffered = BytesIO()
             image.save(buffered, format='PNG')
-            img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            img_bytes = buffered.getvalue()
+            img_size = len(img_bytes)
+            lazyllm.LOG.info(f"Image saved to BytesIO: size={img_size} bytes, image_size={image.size}, mode={image.mode}")
+            if img_size < 1000:  # 小于1KB的图像可能有问题
+                lazyllm.LOG.warning(f"Image size is suspiciously small: {img_size} bytes")
+            img_str = base64.b64encode(img_bytes).decode('utf-8')
+            base64_len = len(img_str)
+            lazyllm.LOG.info(f"Base64 encoded: length={base64_len} chars")
         elif isinstance(image, np.ndarray):
+            # 确保数组值在有效范围内
+            if np.any(np.isnan(image)) or np.any(np.isinf(image)):
+                image = np.nan_to_num(image, nan=0.0, posinf=255.0, neginf=0.0)
+            image = np.clip(image, 0, 255).astype(np.uint8)
             image = PIL.Image.fromarray(image)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
             buffered = BytesIO()
             image.save(buffered, format='PNG')
-            img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            img_bytes = buffered.getvalue()
+            img_size = len(img_bytes)
+            lazyllm.LOG.info(f"Image (from numpy) saved to BytesIO: size={img_size} bytes, image_size={image.size}, mode={image.mode}")
+            if img_size < 1000:
+                lazyllm.LOG.warning(f"Image size is suspiciously small: {img_size} bytes")
+            img_str = base64.b64encode(img_bytes).decode('utf-8')
+            base64_len = len(img_str)
+            lazyllm.LOG.info(f"Base64 encoded: length={base64_len} chars")
         else:
             raise ValueError('Unsupported image type')
         return f'data:image/png;base64,{img_str}'
@@ -119,14 +223,133 @@ class _StableDiffusion3(object):
             if model_type in self.base_sd.lower():
                 return caller(self, string)
 
-        imgs = self.paintor(
-            string,
-            negative_prompt='',
-            num_inference_steps=28,
-            guidance_scale=7.0,
-            max_sequence_length=512,
-        ).images
+        # 检查 pipeline 类型，如果是 ZImagePipeline，使用不同的参数
+        pipeline_type = type(self.paintor).__name__
+        if 'ZImage' in pipeline_type:
+            # ZImagePipeline 的调用方式（根据官方文档，Turbo 模型使用 guidance_scale=0.0 和更少的步数）
+            result = self.paintor(
+                prompt=string,
+                height=1024,
+                width=1024,
+                num_inference_steps=9,  # Turbo 模型推荐值
+                guidance_scale=0.0,  # Turbo 模型必须使用 0.0
+                negative_prompt=None,
+            )
+            imgs = result.images
+            # 验证和修复图像
+            imgs = self._validate_and_fix_images(imgs)
+        else:
+            # StableDiffusion3Pipeline 的调用方式
+            lazyllm.LOG.info(f"Calling StableDiffusion3Pipeline with prompt: {string[:100]}...")
+            lazyllm.LOG.info(f"Pipeline type: {type(self.paintor).__name__}, base_sd: {self.base_sd}")
+            # 检查 pipeline 是否已加载
+            if not hasattr(self, 'paintor') or self.paintor is None:
+                lazyllm.LOG.error("Pipeline not loaded!")
+                raise ValueError("Pipeline not loaded")
+            try:
+                # 检查设备
+                if hasattr(self.paintor, 'device'):
+                    lazyllm.LOG.info(f"Pipeline device: {self.paintor.device}")
+                # 生成图像
+                result = self.paintor(
+                    string,
+                    negative_prompt='',
+                    num_inference_steps=28,
+                    guidance_scale=7.0,
+                    max_sequence_length=512,
+                )
+                lazyllm.LOG.info(f"Generation result type: {type(result)}, has 'images' attr: {hasattr(result, 'images')}")
+                if hasattr(result, 'images'):
+                    imgs = result.images
+                    lazyllm.LOG.info(f"Generated {len(imgs)} images, pipeline_type={type(self.paintor).__name__}")
+                    if not imgs:
+                        lazyllm.LOG.error("No images in result.images!")
+                        raise ValueError("No images generated")
+                    # 检查第一张图像的基本信息
+                    if imgs and len(imgs) > 0:
+                        first_img = imgs[0]
+                        lazyllm.LOG.info(f"First image type: {type(first_img)}, size: {first_img.size if hasattr(first_img, 'size') else 'N/A'}, mode: {first_img.mode if hasattr(first_img, 'mode') else 'N/A'}")
+                        # 快速检查是否为全黑
+                        if isinstance(first_img, PIL.Image.Image):
+                            img_array = np.array(first_img)
+                            img_min, img_max = img_array.min(), img_array.max()
+                            if img_max == 0:
+                                lazyllm.LOG.error(f"Generated image is all black! This indicates generation failure.")
+                                # 尝试检查是否有其他属性包含有用信息
+                                if hasattr(result, 'nsfw_content_detected'):
+                                    lazyllm.LOG.info(f"NSFW content detected: {result.nsfw_content_detected}")
+                                # 检查模型组件状态
+                                lazyllm.LOG.error("Checking model components for issues...")
+                                if hasattr(self.paintor, 'transformer'):
+                                    transformer = self.paintor.transformer
+                                    if transformer is not None:
+                                        lazyllm.LOG.info(f"Transformer: {type(transformer).__name__}, device: {next(transformer.parameters()).device if hasattr(transformer, 'parameters') else 'N/A'}")
+                                    else:
+                                        lazyllm.LOG.error("Transformer is None!")
+                                if hasattr(self.paintor, 'vae'):
+                                    vae = self.paintor.vae
+                                    if vae is not None:
+                                        lazyllm.LOG.info(f"VAE: {type(vae).__name__}, device: {next(vae.parameters()).device if hasattr(vae, 'parameters') else 'N/A'}")
+                                    else:
+                                        lazyllm.LOG.error("VAE is None!")
+                                # 尝试使用备用参数重新生成
+                                lazyllm.LOG.warning("Attempting regeneration with alternative parameters...")
+                                try:
+                                    result_retry = self.paintor(
+                                        string,
+                                        negative_prompt='',
+                                        num_inference_steps=50,  # 增加步数
+                                        guidance_scale=7.5,  # 稍微提高引导强度
+                                        max_sequence_length=512,
+                                    )
+                                    if hasattr(result_retry, 'images') and result_retry.images:
+                                        retry_img = result_retry.images[0]
+                                        if isinstance(retry_img, PIL.Image.Image):
+                                            retry_array = np.array(retry_img)
+                                            retry_min, retry_max = retry_array.min(), retry_array.max()
+                                            if retry_max > 0:
+                                                lazyllm.LOG.info(f"Retry successful! New image range: min={retry_min}, max={retry_max}")
+                                                imgs = result_retry.images
+                                            else:
+                                                lazyllm.LOG.error("Retry also produced all black image. This suggests a fundamental issue with the model or generation process.")
+                                                # 检查是否是VAE解码问题
+                                                lazyllm.LOG.error("Possible causes: 1) VAE decoder issue, 2) Model weights corrupted, 3) Device/memory issue, 4) Incompatible diffusers version")
+                                except Exception as retry_e:
+                                    lazyllm.LOG.error(f"Retry generation failed: {retry_e}", exc_info=True)
+                else:
+                    lazyllm.LOG.error(f"Result does not have 'images' attribute. Available attributes: {dir(result)}")
+                    raise ValueError("Result does not have 'images' attribute")
+            except Exception as e:
+                lazyllm.LOG.error(f"Error during image generation: {e}", exc_info=True)
+                raise
+            # 验证和修复图像
+            imgs = self._validate_and_fix_images(imgs)
+            lazyllm.LOG.info(f"After validation: {len(imgs)} images")
+            if not imgs:
+                lazyllm.LOG.error("No images after validation!")
+                raise ValueError("No valid images after validation")
+            # 检查是否所有图像都是全黑的
+            all_black = True
+            for idx, img in enumerate(imgs):
+                if isinstance(img, PIL.Image.Image):
+                    img_array = np.array(img)
+                    if img_array.max() > 0:
+                        all_black = False
+                        break
+            if all_black:
+                lazyllm.LOG.error("All generated images are black! This indicates a fundamental generation failure.")
+                lazyllm.LOG.error("Possible causes:")
+                lazyllm.LOG.error("1) VAE decoder issue - VAE may not be decoding latents correctly")
+                lazyllm.LOG.error("2) Model weights corrupted or incomplete")
+                lazyllm.LOG.error("3) Device/memory issue - GPU memory may be insufficient")
+                lazyllm.LOG.error("4) Incompatible diffusers version")
+                lazyllm.LOG.error("5) Model configuration issue")
+                # 抛出异常，而不是返回全黑图像
+                raise RuntimeError("Image generation failed: all generated images are black. Please check model files, device configuration, and diffusers version compatibility.")
         img_path_list = self.images_to_base64(imgs)
+        lazyllm.LOG.info(f"Converted to base64: {len(img_path_list)} items, first item length={len(img_path_list[0]) if img_path_list else 0}")
+        if img_path_list and len(img_path_list[0]) < 1000:
+            lazyllm.LOG.warning(f"Base64 string is suspiciously short: {len(img_path_list[0])} chars")
         return encode_query_with_filepaths(files=img_path_list)
 
     @classmethod
@@ -161,6 +384,8 @@ def call_flux(model, prompt):
         guidance_scale=3.5,
         max_sequence_length=512,
     ).images
+    # 验证和修复图像
+    imgs = model._validate_and_fix_images(imgs)
     img_path_list = model.images_to_files(imgs, model.save_path)
     return encode_query_with_filepaths(files=img_path_list)
 
@@ -188,7 +413,44 @@ def call_cogview(model, prompt):
         guidance_scale=3.5,
         num_images_per_prompt=1,
     ).images
+    # 验证和修复图像
+    imgs = model._validate_and_fix_images(imgs)
     img_path_list = model.images_to_files(imgs, model.save_path)
+    return encode_query_with_filepaths(files=img_path_list)
+
+@_StableDiffusion3.register_loader('zimage')
+def load_zimage(model):
+    import torch
+    from diffusers import ZImagePipeline
+    # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
+    # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
+    # 根据官方文档，使用 bfloat16 以获得最佳性能，并设置 low_cpu_mem_usage=False
+    model.paintor = ZImagePipeline.from_pretrained(
+        model.base_sd,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=False,
+    )
+    if model.num_gpus > 1:
+        model.paintor.enable_model_cpu_offload()
+        lazyllm.LOG.info(f"Loaded ZImagePipeline with multi-GPU support (num_gpus={model.num_gpus})")
+    else:
+        model.paintor.to('cuda')
+
+@_StableDiffusion3.register_caller('zimage')
+def call_zimage(model, prompt):
+    # 根据官方文档，Turbo 模型使用 guidance_scale=0.0 和更少的步数
+    result = model.paintor(
+        prompt=prompt,
+        height=1024,
+        width=1024,
+        num_inference_steps=9,  # Turbo 模型推荐值
+        guidance_scale=0.0,  # Turbo 模型必须使用 0.0
+        negative_prompt=None,
+    )
+    imgs = result.images
+    # 验证和修复图像
+    imgs = model._validate_and_fix_images(imgs)
+    img_path_list = model.images_to_base64(imgs)
     return encode_query_with_filepaths(files=img_path_list)
 
 @_StableDiffusion3.register_loader('wan')

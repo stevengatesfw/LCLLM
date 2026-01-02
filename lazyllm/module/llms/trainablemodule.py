@@ -602,6 +602,15 @@ class TrainableModule(UrlModule):
         else:
             data = __input
             if stream_output: LOG.warning('stream_output is not supported when template_message is not set, ignore it')
+            # 对于图像生成模型（SD/T2V），过滤掉 LLM 特定参数
+            if kw:
+                model_type = (self._type.value if self._type else ModelManager.get_model_type(self._base_model)).upper()
+                if model_type in ('SD', 'T2V'):
+                    llm_specific_params = {'temperature', 'top_p', 'max_tokens', 'max_new_tokens', 'modality', 'skip_special_tokens', 'extra_args'}
+                    filtered_kw = {k: v for k, v in kw.items() if k not in llm_specific_params}
+                    if filtered_kw != kw:
+                        LOG.info(f'Filtered out LLM-specific parameters for {model_type} model: {set(kw.keys()) - set(filtered_kw.keys())}')
+                        kw = filtered_kw
             assert not kw, 'kw is not supported when template_message is not set'
 
         if tools or self._tools:
