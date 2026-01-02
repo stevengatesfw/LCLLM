@@ -1,11 +1,12 @@
 toml
+playwright>=1.40.0
 fastapi>=0.111.0
 loguru>=0.7.2
 #pydantic<=2.10.6 leave vllm to install 
 requests>=2.32.2
 uvicorn
 cloudpickle>=3.0.0
-gradio<5.0.0
+gradio==5.49.1
 gradio-client>=0.6.1
 protobuf>=3.20.1
 docstring-parser
@@ -86,7 +87,7 @@ pytesseract
 #openai-whisper
 #qwen-vl-utils
 accelerate==1.6.0
-lmdeploy==0.11.0
+lmdeploy==0.11.1
 boto3
 botocore
 #ftfy==6.3.1

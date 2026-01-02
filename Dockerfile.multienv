@@ -60,74 +60,25 @@ ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
-# 设置编译选项（用于 flash-attn）
-ENV TORCH_CUDA_ARCH_LIST="8.0;9.0"
-ENV MAX_JOBS=1
-# 增加编译超时和优化选项
-ENV FLASH_ATTENTION_SKIP_CUDA_BUILD=0
-ENV FLASH_ATTENTION_FORCE_BUILD=0
-
 # 设置工作目录
 WORKDIR /app
 
 # 复制源码
 COPY . /app/
 
-# ============================================================================
-# 安装 lcagent-core 环境依赖（标准环境，transformers==4.57.3）
-# ============================================================================
-# 说明：将 flash-attn 分离到单独的 RUN 层，避免编译超时影响整个构建
+# 安装环境依赖， flash-attn后续通过wheel手动安装 https://github.com/Dao-AILab/flash-attention/releases
 RUN set -x && \
-    echo "📦 安装 lcagent-core 环境依赖（标准环境）..." && \
     grep -v "^flash-attn" requirements.full.txt | /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir -r /dev/stdin && \
     /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir -e . && \
     /opt/conda/envs/lcagent-core/bin/pip cache purge
 
-# 单独安装 flash-attn（分离层，避免编译超时影响其他依赖）
-# 优先尝试使用预编译 wheel（避免长时间编译），如果不可用则编译安装
 RUN set -x && \
-    echo "🔍 尝试在 lcagent-core 环境中安装 flash-attn（优先使用预编译版本）..." && \
-    if /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir flash-attn --only-binary :all: 2>&1; then \
-        echo "✅ flash-attn 安装成功（使用预编译 wheel）" && \
-        /opt/conda/envs/lcagent-core/bin/pip show flash-attn | head -5; \
-    else \
-        echo "⚠️ 预编译 wheel 不可用，开始编译安装（可能需要 10-30 分钟）..." && \
-        if /opt/conda/envs/lcagent-core/bin/pip install --no-cache-dir --no-build-isolation flash-attn 2>&1; then \
-            echo "✅ flash-attn 编译安装成功" && \
-            /opt/conda/envs/lcagent-core/bin/pip show flash-attn | head -5; \
-        else \
-            echo "❌ flash-attn 安装失败，跳过（如果不需要可以忽略）" && \
-            true; \
-        fi; \
-    fi
-
-# ============================================================================
-# 安装 lcagent-lmdeploy 环境依赖（lmdeploy 专用环境，transformers==4.47.1）
-# ============================================================================
-# 说明：此环境专门用于需要 transformers < 4.48.0 的模型（如 deepseek-vl2）
-# 只安装必要的依赖，避免重复安装
-RUN set -x && \
-    echo "📦 安装 lcagent-lmdeploy 环境依赖（lmdeploy 专用环境）..." && \
-    echo "   使用 transformers==4.47.1（兼容 lmdeploy 0.11.0 的 deepseek-vl2）" && \
-    # 先安装基础依赖（从 requirements.full.txt 中提取，但排除 transformers）
     grep -v "^flash-attn" requirements.full.txt | grep -v "^transformers" | \
     /opt/conda/envs/lcagent-lmdeploy/bin/pip install --no-cache-dir -r /dev/stdin && \
-    # 安装指定版本的 transformers（兼容 lmdeploy）
     /opt/conda/envs/lcagent-lmdeploy/bin/pip install --no-cache-dir transformers==4.47.1 && \
-    # 确保 lmdeploy 已安装
     /opt/conda/envs/lcagent-lmdeploy/bin/pip install --no-cache-dir lmdeploy==0.11.0 && \
-    # 安装 lazyllm 包
     /opt/conda/envs/lcagent-lmdeploy/bin/pip install --no-cache-dir -e . && \
     /opt/conda/envs/lcagent-lmdeploy/bin/pip cache purge
-
-# 验证两个环境的 transformers 版本
-RUN set -x && \
-    echo "🔍 验证 conda 环境配置..." && \
-    echo "lcagent-core 环境 transformers 版本:" && \
-    /opt/conda/envs/lcagent-core/bin/pip show transformers | grep Version || echo "未安装" && \
-    echo "lcagent-lmdeploy 环境 transformers 版本:" && \
-    /opt/conda/envs/lcagent-lmdeploy/bin/pip show transformers | grep Version || echo "未安装" && \
-    echo "✅ 多环境配置完成"
 
 # 设置环境变量
 ENV PYTHONPATH=/app
