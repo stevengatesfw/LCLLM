@@ -22,8 +22,8 @@ class _DeepSeekOCR(object):
     def __init__(
         self,
         model_name_or_path: str = "deepseek-ai/DeepSeek-OCR",
-        prompt: str = "<image>\n<|grounding|>Convert the document to markdown. ",
-        max_tokens: int = 8192,
+        prompt: str = "<image>\n<|grounding|>Convert the document to markdown format. Please recognize all content completely and preserve the original layout and formatting.\n\nRequirements:\n1. Use markdown table syntax for tables: | Column1 | Column2 | Column3 |\n2. Use line breaks (\\n) to separate different rows and sections\n3. Use markdown lists (- item) for list items\n4. Use markdown headings (# title) for titles\n5. Preserve all spacing and structure from the original document\n6. Do not merge all content into a single paragraph\n\nOutput the result in proper markdown format with correct line breaks and table structure. ",
+        max_tokens: int = 16384,
         temperature: float = 0.0,
         # DeepSeek-OCR vLLM 推荐的 ngram logits processor 参数（可按需调整）
         ngram_size: int = 30,
@@ -174,23 +174,47 @@ class _DeepSeekOCR(object):
         model_input = []
         for file_path in file_list:
             image = Image.open(file_path).convert("RGB")
+            
+            # 预处理图片：如果图片太大，按比例缩放而不是裁剪，避免识别不完整
+            # DeepSeek-OCR 推荐的最大尺寸：base_size=1024 或 1280
+            # 为了确保完整识别，我们使用 1024 作为最大尺寸，保持宽高比
+            max_size = 1024
+            width, height = image.size
+            if width > max_size or height > max_size:
+                # 按比例缩放，保持宽高比
+                if width > height:
+                    new_width = max_size
+                    new_height = int(height * max_size / width)
+                else:
+                    new_height = max_size
+                    new_width = int(width * max_size / height)
+                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                lazyllm.LOG.info(f"Resized image from {width}x{height} to {new_width}x{new_height} to avoid cropping")
+            
             model_input.append(
                 {"prompt": self.prompt, "multi_modal_data": {"image": image}}
             )
 
-        try:
-            outputs = self._llm.generate(model_input, sampling_param)
-            texts = []
-            for out in outputs:
-                try:
-                    texts.append(out.outputs[0].text)
-                except Exception as e:
-                    lazyllm.LOG.warning(f'DeepSeekOCR: Failed to extract text from output: {e}, output: {out}')
-                    texts.append(str(out))
-            return "\n\n".join(texts)
-        except Exception as e:
-            lazyllm.LOG.error(f'DeepSeekOCR: Generation failed: {e}', exc_info=True)
-            raise
+        outputs = self._llm.generate(model_input, sampling_param)
+        results = []
+        for idx, out in enumerate(outputs):
+            try:
+                text = out.outputs[0].text
+            except Exception:
+                text = str(out)
+            
+            # 按文件分隔显示，保留 markdown 格式
+            if len(file_list) > 1:
+                file_name = os.path.basename(file_list[idx]) if idx < len(file_list) else f"文件{idx + 1}"
+                results.append(f"## {file_name}\n\n{text}")
+            else:
+                results.append(text)
+        
+        # 多个文件时用分隔符分隔，单个文件直接返回
+        if len(results) > 1:
+            return "\n\n---\n\n".join(results)
+        else:
+            return results[0] if results else ""
 
     @classmethod
     def rebuild(cls, *args, **kw):
@@ -230,7 +254,7 @@ class DeepSeekOCRDeploy(LazyLLMDeployBase):
         trust_remote_code=True,
         port=None,
         prompt: Optional[str] = None,
-        max_tokens: int = 8192,
+        max_tokens: int = 16384,
         temperature: float = 0.0,
         ngram_size: int = 30,
         window_size: int = 90,
@@ -257,7 +281,7 @@ class DeepSeekOCRDeploy(LazyLLMDeployBase):
 
         prompt = (
             self._prompt
-            or "<image>\n<|grounding|>Convert the document to markdown. "
+            or "<image>\n<|grounding|>Convert the document to markdown format. Please recognize all content completely and preserve the original layout and formatting.\n\nRequirements:\n1. Use markdown table syntax for tables: | Column1 | Column2 | Column3 |\n2. Use line breaks (\\n) to separate different rows and sections\n3. Use markdown lists (- item) for list items\n4. Use markdown headings (# title) for titles\n5. Preserve all spacing and structure from the original document\n6. Do not merge all content into a single paragraph\n\nOutput the result in proper markdown format with correct line breaks and table structure. "
         )
 
         return lazyllm.deploy.RelayServer(
