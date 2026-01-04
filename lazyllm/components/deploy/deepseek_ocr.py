@@ -22,7 +22,7 @@ class _DeepSeekOCR(object):
     def __init__(
         self,
         model_name_or_path: str = "deepseek-ai/DeepSeek-OCR",
-        prompt: str = "<image>\n<|grounding|>Convert the document to markdown format. Please recognize all content completely and preserve the original layout and formatting.\n\nRequirements:\n1. Use markdown table syntax for tables: | Column1 | Column2 | Column3 |\n2. Use line breaks (\\n) to separate different rows and sections\n3. Use markdown lists (- item) for list items\n4. Use markdown headings (# title) for titles\n5. Preserve all spacing and structure from the original document\n6. Do not merge all content into a single paragraph\n\nOutput the result in proper markdown format with correct line breaks and table structure. ",
+        prompt: str = "<image>\n<|grounding|>Convert the document to markdown format.",
         max_tokens: int = 16384,
         temperature: float = 0.0,
         # DeepSeek-OCR vLLM 推荐的 ngram logits processor 参数（可按需调整）
@@ -281,7 +281,7 @@ class DeepSeekOCRDeploy(LazyLLMDeployBase):
 
         prompt = (
             self._prompt
-            or "<image>\n<|grounding|>Convert the document to markdown format. Please recognize all content completely and preserve the original layout and formatting.\n\nRequirements:\n1. Use markdown table syntax for tables: | Column1 | Column2 | Column3 |\n2. Use line breaks (\\n) to separate different rows and sections\n3. Use markdown lists (- item) for list items\n4. Use markdown headings (# title) for titles\n5. Preserve all spacing and structure from the original document\n6. Do not merge all content into a single paragraph\n\nOutput the result in proper markdown format with correct line breaks and table structure. "
+            or "<image>\n<|grounding|>Convert the document to markdown format."
         )
 
         return lazyllm.deploy.RelayServer(
