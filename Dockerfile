@@ -62,6 +62,13 @@ RUN set -x && \
     pip install --no-cache-dir -e . && \
     pip cache purge
 
+# 安装最新版本的 diffusers 以支持 Z-Image（需要从 GitHub 安装，使用代理）
+RUN python -c 'from diffusers import ZImagePipeline' 2>/dev/null || ( \
+    echo 'Installing latest diffusers from GitHub for Z-Image support...' && \
+    pip install --upgrade --no-cache-dir 'git+https://githubproxy.cc/https://github.com/huggingface/diffusers' 2>&1 | tail -10 || echo 'Warning: diffusers installation may have failed, but continuing...' && \
+    pip install --upgrade --no-cache-dir 'peft>=0.17.0' 2>&1 | tail -5 || echo 'Warning: peft upgrade may have failed, but continuing...' \
+    )
+
 # 设置环境变量
 ENV PYTHONPATH=/app
 ENV LAZYLLM_DEFAULT_LAUNCHER=empty
