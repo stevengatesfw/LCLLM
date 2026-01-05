@@ -172,7 +172,28 @@ class _OCR(object):
             else:
                 paddleocr_kwargs['text_recognition_model_name'] = self.text_recognition_model_name
             paddleocr_kwargs['rec_model_dir'] = rec_model_dir
-
+        try:
+            import paddle
+            # 尝试导入 AnalysisConfig，可能在不同的位置
+            try:
+                from paddle.base.libpaddle import AnalysisConfig
+            except ImportError:
+                try:
+                    from paddle.inference import AnalysisConfig
+                except ImportError:
+                    AnalysisConfig = None
+            
+            if AnalysisConfig is not None and not hasattr(AnalysisConfig, 'set_optimization_level'):
+                lazyllm.LOG.warning("PaddlePaddle AnalysisConfig missing set_optimization_level, adding compatibility patch")
+                def set_optimization_level(self, level):
+                    # PaddlePaddle 2.6.2+ 使用 switch_ir_optim 替代
+                    if hasattr(self, 'switch_ir_optim'):
+                        self.switch_ir_optim(True)
+                    # 否则什么都不做，因为某些版本的 PaddlePaddle 不需要这个方法
+                AnalysisConfig.set_optimization_level = set_optimization_level
+                lazyllm.LOG.info("Added compatibility patch for set_optimization_level")
+        except Exception as patch_e:
+            lazyllm.LOG.warning(f"Failed to apply PaddlePaddle compatibility patch: {patch_e}")
         self.ocr = paddleocr.PaddleOCR(**paddleocr_kwargs)
     
     def _is_valid_model_dir(self, model_dir):

@@ -69,6 +69,9 @@ RUN python -c 'from diffusers import ZImagePipeline' 2>/dev/null || ( \
     pip install --upgrade --no-cache-dir 'peft>=0.17.0' 2>&1 | tail -5 || echo 'Warning: peft upgrade may have failed, but continuing...' \
     )
 
+# 安装 PaddlePaddle GPU 版本（用于 PaddleOCR）
+RUN python -m pip install paddlepaddle-gpu==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+
 # 设置环境变量
 ENV PYTHONPATH=/app
 ENV LAZYLLM_DEFAULT_LAUNCHER=empty
