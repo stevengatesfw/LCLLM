@@ -52,7 +52,7 @@ WORKDIR /app
 # 复制源码
 COPY . /app/
 
-# 安装 Python 依赖，flash-attn 后续通过 wheel 手动安装 https://github.com/Dao-AILab/flash-attention/releases
+# 安装 Python 依赖，flash-attn 后续通过 wheel 手动安装 https://github.com/Dao-AILab/flash-attention/releases, https://github.com/mjun0812/flash-attention-prebuild-wheels/releases
 # 注意：vllm 0.12.0 需要 torch==2.9.0，而 lmdeploy 0.11.1 需要 torch<=2.8.0
 RUN set -x && \
     grep -v "^flash-attn" requirements.full.txt | grep -v "^gradio" | grep -v "^lmdeploy" > /tmp/requirements.base.txt && \

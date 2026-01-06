@@ -51,10 +51,13 @@ class _StableDiffusion3(object):
             import torch_npu  # noqa F401
             from torch_npu.contrib import transfer_to_npu  # noqa F401
 
+        lazyllm.LOG.info(f"load_sd: base_sd='{self.base_sd}', registered loaders: {list(self._load_registry.keys())}")
         for model_type, loader in self._load_registry.items():
             if model_type in self.base_sd.lower():
+                lazyllm.LOG.info(f"load_sd: Matched model_type '{model_type}' in base_sd, using registered loader")
                 loader(self)
                 return
+        lazyllm.LOG.info(f"load_sd: No registered loader matched, using default StableDiffusion3Pipeline")
 
         # 多 GPU 支持：使用 enable_model_cpu_offload 自动分配
         # TODO: 目前只是显存分布式，不是计算分布式，待优化为真正的并行计算
@@ -221,6 +224,7 @@ class _StableDiffusion3(object):
 
         for model_type, caller in self._call_registry.items():
             if model_type in self.base_sd.lower():
+                lazyllm.LOG.info(f"Using registered caller for model type: {model_type}")
                 return caller(self, string)
 
         # 检查 pipeline 类型，如果是 ZImagePipeline，使用不同的参数
@@ -452,6 +456,125 @@ def call_zimage(model, prompt):
     imgs = model._validate_and_fix_images(imgs)
     img_path_list = model.images_to_base64(imgs)
     return encode_query_with_filepaths(files=img_path_list)
+
+@_StableDiffusion3.register_loader('hunyuanvideo')
+def load_hunyuanvideo(model):
+    import torch
+    from diffusers import HunyuanVideo15Pipeline
+    # HunyuanVideo 需要使用专门的 HunyuanVideo15Pipeline
+    model.paintor = HunyuanVideo15Pipeline.from_pretrained(
+        model.base_sd,
+        torch_dtype=torch.bfloat16,
+    )
+    # 启用 VAE tiling 以节省显存
+    if hasattr(model.paintor, 'vae') and hasattr(model.paintor.vae, 'enable_tiling'):
+        model.paintor.vae.enable_tiling()
+        lazyllm.LOG.info("Enabled VAE tiling for memory optimization")
+    
+    # 使用 sequential CPU offload 以更激进地节省显存
+    # 这会逐个组件 offload，而不是整个模型
+    if hasattr(model.paintor, 'enable_sequential_cpu_offload'):
+        model.paintor.enable_sequential_cpu_offload()
+        lazyllm.LOG.info("Enabled sequential CPU offload for maximum memory savings")
+    elif model.num_gpus > 1:
+        model.paintor.enable_model_cpu_offload()
+        lazyllm.LOG.info(f"Loaded HunyuanVideo15Pipeline with multi-GPU support (num_gpus={model.num_gpus})")
+    else:
+        model.paintor.enable_model_cpu_offload()  # 即使单GPU也使用 offload 以节省显存
+        lazyllm.LOG.info(f"Loaded HunyuanVideo15Pipeline on single GPU with CPU offload")
+
+@_StableDiffusion3.register_caller('hunyuanvideo')
+def call_hunyuanvideo(model, prompt):
+    from diffusers.utils import export_to_video
+    import torch
+    # 确保 prompt 是字符串或列表类型
+    if not isinstance(prompt, (str, list)):
+        prompt = str(prompt)
+    
+    # 显存优化：降低帧数和步数
+    # 121 帧需要 ~50GB 显存，49 帧需要 ~20GB 显存
+    # 根据可用显存动态调整
+    try:
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+            if gpu_memory < 50:
+                # 40GB GPU: 使用更保守的参数
+                num_frames = 49  # 约 2 秒 @ 24fps
+                num_inference_steps = 30
+                lazyllm.LOG.info(f"GPU memory: {gpu_memory:.1f}GB, using conservative settings: {num_frames} frames, {num_inference_steps} steps")
+            elif gpu_memory < 80:
+                # 50-80GB GPU: 中等参数
+                num_frames = 81  # 约 3.4 秒 @ 24fps
+                num_inference_steps = 40
+                lazyllm.LOG.info(f"GPU memory: {gpu_memory:.1f}GB, using medium settings: {num_frames} frames, {num_inference_steps} steps")
+            else:
+                # 80GB+ GPU: 使用推荐参数
+                num_frames = 121  # 约 5 秒 @ 24fps
+                num_inference_steps = 50
+                lazyllm.LOG.info(f"GPU memory: {gpu_memory:.1f}GB, using recommended settings: {num_frames} frames, {num_inference_steps} steps")
+        else:
+            num_frames = 49
+            num_inference_steps = 30
+    except Exception as e:
+        lazyllm.LOG.warning(f"Failed to detect GPU memory, using conservative settings: {e}")
+        num_frames = 49
+        num_inference_steps = 30
+    
+    # HunyuanVideo15Pipeline 的正确调用方式
+    # 根据官方文档，使用 num_frames 而不是 height/width
+    generator = torch.Generator(device='cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # 尝试使用 attention backend 优化（如果可用）
+    # 注意：如果 flash-attn2 需要从 Hub 下载但失败，会回退到默认 attention
+    try:
+        from diffusers import attention_backend
+        # 使用 flash attention 优化显存
+        with attention_backend("flash_hub"):  # 或 "_flash_3_hub" for H100/H800
+            result = model.paintor(
+                prompt=prompt,
+                num_frames=num_frames,
+                num_inference_steps=num_inference_steps,
+                generator=generator,
+            )
+            lazyllm.LOG.info("Used flash attention backend for memory optimization")
+    except Exception as e:
+        # 捕获所有异常（包括 ImportError, AttributeError, 以及下载失败等）
+        error_msg = str(e).lower()
+        if 'snapshot folder' in error_msg or 'cannot find' in error_msg or 'hub' in error_msg:
+            lazyllm.LOG.warning(f"Flash attention backend download failed or not available: {e}, using default attention")
+        else:
+            lazyllm.LOG.warning(f"Flash attention backend not available: {e}, using default attention")
+        # 使用默认 attention
+        result = model.paintor(
+            prompt=prompt,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            generator=generator,
+        )
+    
+    # HunyuanVideo15Pipeline 返回的 frames 是列表或数组
+    # 注意：不能直接对数组进行布尔判断，需要使用 len() 或 is not None
+    if hasattr(result, 'frames') and result.frames is not None:
+        # 检查 frames 是否为空（支持列表、数组等可迭代对象）
+        try:
+            if len(result.frames) == 0:
+                raise ValueError(f"HunyuanVideo15Pipeline returned empty frames")
+            videos = result.frames
+        except (TypeError, AttributeError):
+            # 如果 result.frames 不支持 len()，尝试直接使用
+            videos = result.frames
+    else:
+        raise ValueError(f"Unexpected result type from HunyuanVideo15Pipeline: {type(result)}, has 'frames': {hasattr(result, 'frames')}, frames value: {getattr(result, 'frames', None)}")
+    
+    unique_id = uuid.uuid4()
+    if not os.path.exists(model.save_path):
+        os.makedirs(model.save_path)
+    vid_path_list = []
+    for i, vid in enumerate(videos):
+        file_path = os.path.join(model.save_path, f'video_{unique_id}_{i}.mp4')
+        export_to_video(vid, file_path, fps=24)  # HunyuanVideo 推荐使用 24fps
+        vid_path_list.append(file_path)
+    return encode_query_with_filepaths(files=vid_path_list)
 
 @_StableDiffusion3.register_loader('wan')
 def load_wan(model):
